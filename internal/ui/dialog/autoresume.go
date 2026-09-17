@@ -116,7 +116,12 @@ func (r *AutoResume) HandleMsg(msg tea.Msg) Action {
 
 // Cursor implements Dialog.
 func (r *AutoResume) Cursor() *tea.Cursor {
-	return InputCursor(r.com.Styles, r.input.Cursor())
+	// The input's visual cursor (the blinking | character) is already
+	// rendered as part of r.input.View() inside Draw. Returning a
+	// tea.Cursor here would add a misplaced terminal cursor whose Y
+	// coordinate doesn't account for the title and model line above
+	// the input, causing it to appear one line too high.
+	return nil
 }
 
 // Draw implements Dialog.
