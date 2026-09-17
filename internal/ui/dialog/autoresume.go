@@ -133,9 +133,9 @@ func (r *AutoResume) Cursor() *tea.Cursor {
 		return nil
 	}
 	// The threshold input is the second content line in the dialog
-	// (after the title and the model line). Offset Y by 1 so the
-	// cursor appears on the correct line.
-	cur.Y += 1
+	// (after the title and the model line). Offset Y by 2 to account
+	// for both lines above the input.
+	cur.Y += 2
 	return InputCursor(r.com.Styles, cur)
 }
 
