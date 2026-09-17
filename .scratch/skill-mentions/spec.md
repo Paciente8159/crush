@@ -42,7 +42,7 @@ palette's user-commands list.
 4. As a Crush user, I want the selector to list every skill that is invocable, so that I don't have to opt each skill in individually just to be able to call it.
 5. As a skill author, I want setting the user-invocable flag to false in my skill's frontmatter to hide my skill from the selector and the command palette, so that I can keep internal-helper skills out of the user's face.
 6. As a skill author, I want omitting the user-invocable flag to leave my skill invocable, so that publishing a skill works without knowing about the flag.
-7. As a Crush user, I want skills that are marked as hidden from the model to also be absent from the `$` selector, so that one flag keeps a skill out of the agent's reach entirely.
+7. As a Crush user, I want skills with disable-model-invocation set to still appear in the `$` selector, so that I can explicitly invoke a skill that the model is not allowed to pick up on its own.
 8. As a Crush user, I want each selector entry to show the skill's name and a truncated description, so that I can tell similar skills apart before picking one.
 9. As a Crush user, I want the selector entries to highlight the characters of my query as I type, so that I can verify I'm looking at the skill I think I am.
 10. As a Crush user, I want the selector to fuzzy-filter as I type after `$`, so that I can reach a skill by typing a few distinctive characters rather than its exact name.
@@ -78,10 +78,10 @@ palette's user-commands list.
 **Skill invocability becomes tri-state.** The skill frontmatter flag
 "user-invocable" changes from a boolean defaulting to hidden to a tri-state
 where omission means invocable and only an explicit false opts out. A skill's
-selector set is the active skills that are both user-invocable and not hidden
-from the model. The resolved (boolean) value is what crosses the workspace,
-client, and backend API boundaries, so the wire and persistence formats are
-unaffected; the tri-state lives only inside skill parsing.
+selector set is the active skills that are user-invocable (regardless of
+disable-model-invocation). The resolved (boolean) value is what crosses the
+workspace, client, and backend API boundaries, so the wire and persistence
+formats are unaffected; the tri-state lives only inside skill parsing.
 
 **The command palette consumes the same resolved flag.** No separate filter
 is introduced; the palette's user-commands list simply inherits the new

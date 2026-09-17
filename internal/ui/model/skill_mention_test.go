@@ -61,6 +61,7 @@ func newSkillMentionTestUI(t *testing.T) *UI {
 			{ID: "/skills/grilling/SKILL.md", Name: "grilling", Description: "Stress-test plans.", UserInvocable: true, ModelInvocable: true},
 			{ID: "/skills/tdd/SKILL.md", Name: "tdd", Description: "Test-driven development.", UserInvocable: true, ModelInvocable: true},
 			{ID: "/skills/hidden/SKILL.md", Name: "hidden", Description: "Not invocable."},
+			{ID: "/skills/modelonly/SKILL.md", Name: "modelonly", Description: "Disabled for model, still usable by user.", UserInvocable: true, ModelInvocable: false},
 		},
 		readSkill: map[string]skills.SkillReadResult{
 			"/skills/grilling/SKILL.md": {Name: "grilling", Description: "Stress-test plans."},
@@ -97,9 +98,9 @@ func TestSkillMentionTriggerAtStart(t *testing.T) {
 
 	loadSkillsIntoPopup(t, u)
 	require.True(t, u.skillsPopup.HasItems())
-	// The non-invocable skill is filtered out of the popup.
+	// The non-invocable skill is filtered out; the model-hidden skill appears.
 	filtered := u.skillsPopup.FilteredSkills()
-	require.Len(t, filtered, 2)
+	require.Len(t, filtered, 3)
 	require.Equal(t, "grilling", filtered[0].Name)
 	require.NotContains(t, u.skillsPopup.Render(), "hidden")
 }

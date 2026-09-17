@@ -379,11 +379,15 @@ func (s *SkillSelector) updateSize() {
 }
 
 // newItem builds a list item for a skill, reusing the shared completion
-// item rendering (fuzzy match highlighting, truncation, focus styles).
+// item rendering (fuzzy match highlighting, truncation, focus styles). The
+// name is rendered in bold (via embedded ANSI) and filtered separately from
+// the description, so typing filters by name only.
 func newItem(skill Skill, normalStyle, focusedStyle, matchStyle lipgloss.Style) list.FilterableItem {
-	text := skill.Name
+	text := lipgloss.NewStyle().Bold(true).Render(skill.Name)
 	if skill.Description != "" {
 		text += "  " + skill.Description
 	}
-	return completions.NewCompletionItem(text, skill, normalStyle, focusedStyle, matchStyle)
+	item := completions.NewCompletionItem(text, skill, normalStyle, focusedStyle, matchStyle)
+	item.SetNameOnly(skill.Name)
+	return item
 }
