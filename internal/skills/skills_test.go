@@ -133,6 +133,102 @@ Instructions here.
 	}
 }
 
+func TestUserInvocableTriState(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		yaml   string
+		wantUI bool
+		wantMU bool
+	}{
+		{
+			name: "omitted user-invocable defaults to invocable",
+			yaml: `---
+name: default-skill
+description: No explicit user-invocable flag.
+---
+body
+`,
+			wantUI: true,
+			wantMU: true,
+		},
+		{
+			name: "explicit user-invocable true",
+			yaml: `---
+name: explicit-true
+description: Explicitly invocable.
+user-invocable: true
+---
+body
+`,
+			wantUI: true,
+			wantMU: true,
+		},
+		{
+			name: "explicit user-invocable false opts out",
+			yaml: `---
+name: explicit-false
+description: Explicitly hidden from user invocation.
+user-invocable: false
+---
+body
+`,
+			wantUI: false,
+			wantMU: true,
+		},
+		{
+			name: "disable-model-invocation hides from model only",
+			yaml: `---
+name: model-hidden
+description: Not visible to the model.
+disable-model-invocation: true
+---
+body
+`,
+			wantUI: true,
+			wantMU: false,
+		},
+		{
+			name: "both flags combined",
+			yaml: `---
+name: both-hidden
+description: Hidden from user and model.
+user-invocable: false
+disable-model-invocation: true
+---
+body
+`,
+			wantUI: false,
+			wantMU: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			skill, err := ParseContent([]byte(tt.yaml))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUI, skill.IsUserInvocable())
+			require.Equal(t, tt.wantMU, skill.IsModelInvocable())
+		})
+	}
+}
+
+func TestIsUserInvocableDirect(t *testing.T) {
+	t.Parallel()
+
+	truth := true
+	falsity := false
+
+	require.True(t, (&Skill{}).IsUserInvocable())
+	require.True(t, (&Skill{UserInvocable: &truth}).IsUserInvocable())
+	require.False(t, (&Skill{UserInvocable: &falsity}).IsUserInvocable())
+	require.False(t, (&Skill{UserInvocable: &falsity, DisableModelInvocation: true}).IsModelInvocable())
+	require.True(t, (&Skill{}).IsModelInvocable())
+}
+
 func TestSkillValidate(t *testing.T) {
 	t.Parallel()
 

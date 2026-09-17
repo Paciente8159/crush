@@ -292,14 +292,15 @@ unchanged:
 
 ## User-invocable skills
 
-Skills can be invoked as commands. Add `user-invocable: true` to the skill's
-YAML frontmatter:
+Skills can be invoked as commands. A skill is invocable by default when no
+`user-invocable` field is set in the frontmatter. To hide it from the `/`
+palette and the `$` mention popup, add `user-invocable: false`:
 
 ```yaml
 ---
 name: my-skill
-description: A skill that can be invoked as a command.
-user-invocable: true
+description: A skill that cannot be manually invoked.
+user-invocable: false
 ---
 ```
 

@@ -39,9 +39,25 @@ type Attachments struct {
 func (m *Attachments) List() []message.Attachment { return m.list }
 func (m *Attachments) Reset()                     { m.list = nil }
 
+// hasSkill reports whether an attachment for the named skill is already
+// in the list.
+func (m *Attachments) hasSkill(name string) bool {
+	for _, a := range m.list {
+		if a.Skill != nil && a.Skill.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Attachments) Update(msg tea.Msg) bool {
 	switch msg := msg.(type) {
 	case message.Attachment:
+		// Selecting an already-attached skill is a no-op: no duplicate
+		// chip, no duplicate prompt injection.
+		if msg.Skill != nil && m.hasSkill(msg.Skill.Name) {
+			return true
+		}
 		m.list = append(m.list, msg)
 		return true
 	case tea.KeyPressMsg:

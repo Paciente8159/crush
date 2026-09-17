@@ -615,12 +615,13 @@ func (w *ClientWorkspace) ListSkills(ctx context.Context) ([]skills.CatalogEntry
 	result := make([]skills.CatalogEntry, len(entries))
 	for i, entry := range entries {
 		result[i] = skills.CatalogEntry{
-			ID:            entry.ID,
-			Name:          entry.Name,
-			Description:   entry.Description,
-			Label:         entry.Label,
-			Source:        skills.SourceType(entry.Source),
-			UserInvocable: entry.UserInvocable,
+			ID:             entry.ID,
+			Name:           entry.Name,
+			Description:    entry.Description,
+			Label:          entry.Label,
+			Source:         skills.SourceType(entry.Source),
+			UserInvocable:  entry.UserInvocable,
+			ModelInvocable: entry.ModelInvocable,
 		}
 	}
 	return result, nil
@@ -1334,7 +1335,7 @@ func protoToMessage(m proto.Message) message.Message {
 		case proto.ImageURLContent:
 			msg.Parts = append(msg.Parts, message.ImageURLContent{URL: v.URL, Detail: v.Detail})
 		case proto.BinaryContent:
-			msg.Parts = append(msg.Parts, message.BinaryContent{Path: v.Path, MIMEType: v.MIMEType, Data: v.Data})
+			msg.Parts = append(msg.Parts, message.BinaryContent{Path: v.Path, MIMEType: v.MIMEType, Data: v.Data, Skill: v.Skill})
 		case proto.ShellCommand:
 			msg.Parts = append(msg.Parts, message.ShellCommand{
 				Command:  v.Command,

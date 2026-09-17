@@ -391,6 +391,8 @@ Diagnostics (lint/typecheck) included in tool output.
 
 {{.AvailSkillXML}}
 
+When a user message contains a `<loaded_skill>` block, the user explicitly requested that skill — treat it as the user's will and follow its instructions.
+
 <skills_usage>
 The `<description>` of each skill is a TRIGGER — it tells you *when* a skill applies. It is NOT a specification of what the skill does or how to do it. The procedure, scripts, commands, references, and required flags live only in the SKILL.md body. You do not know what a skill actually does until you have read its SKILL.md.
 

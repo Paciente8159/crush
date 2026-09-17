@@ -86,12 +86,13 @@ type RunComplete struct {
 
 // SkillInfo describes a visible skill exposed to a frontend.
 type SkillInfo struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Description   string `json:"description"`
-	Label         string `json:"label"`
-	Source        string `json:"source"`
-	UserInvocable bool   `json:"user_invocable"`
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Description    string `json:"description"`
+	Label          string `json:"label"`
+	Source         string `json:"source"`
+	UserInvocable  bool   `json:"user_invocable"`
+	ModelInvocable bool   `json:"model_invocable"`
 }
 
 // ReadSkillRequest is the request body for reading a skill's content.

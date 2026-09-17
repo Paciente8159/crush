@@ -132,6 +132,7 @@ type BinaryContent struct {
 	Path     string
 	MIMEType string
 	Data     []byte
+	Skill    *message.SkillInfo `json:"skill,omitempty"`
 }
 
 // String returns a base64-encoded string of the binary data.

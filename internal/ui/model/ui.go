@@ -55,6 +55,7 @@ import (
 	fimage "github.com/charmbracelet/crush/internal/ui/image"
 	"github.com/charmbracelet/crush/internal/ui/logo"
 	"github.com/charmbracelet/crush/internal/ui/notification"
+	"github.com/charmbracelet/crush/internal/ui/skillselector"
 	"github.com/charmbracelet/crush/internal/ui/styles"
 	"github.com/charmbracelet/crush/internal/ui/util"
 	"github.com/charmbracelet/crush/internal/version"
@@ -303,6 +304,12 @@ type UI struct {
 	completionsQuery         string
 	completionsPositionStart image.Point // x,y where user typed '@'
 
+	// Skill mention popup state
+	skillsPopup              *skillselector.SkillSelector
+	skillsPopupOpen          bool
+	skillsPopupStartIndex    int
+	skillsPopupPositionStart image.Point // x,y where user typed the trigger
+
 	// Chat components
 	chat *Chat
 
@@ -458,6 +465,13 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		com.Styles.Completions.Match,
 	)
 
+	// Skill mention popup, parallel to the file completions component.
+	skillPopup := skillselector.New(
+		com.Styles.Completions.Normal,
+		com.Styles.Completions.Focused,
+		com.Styles.Completions.Match,
+	)
+
 	todoSpinner := spinner.New(
 		spinner.WithSpinner(spinner.MiniDot),
 		spinner.WithStyle(com.Styles.Pills.TodoSpinner),
@@ -490,6 +504,7 @@ func New(com *common.Common, initialSessionID string, continueLast bool) *UI {
 		chat:                ch,
 		header:              header,
 		completions:         comp,
+		skillsPopup:         skillPopup,
 		attachments:         attachments,
 		todoSpinner:         todoSpinner,
 		frames:              newFrameCache(frameCacheTTL, frameCacheMaxEntries),
@@ -1460,6 +1475,15 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case completions.CompletionItemsLoadedMsg:
 		if m.completionsOpen {
 			m.completions.SetItems(msg.Files, msg.Resources)
+		}
+	case skillselector.ItemsLoadedMsg:
+		if m.skillsPopupOpen {
+			if len(msg.Skills) == 0 {
+				// Nothing invocable; dismiss without ever rendering.
+				m.closeSkillsPopup()
+			} else {
+				m.skillsPopup.SetItems(msg.Skills)
+			}
 		}
 	case uv.KittyGraphicsEvent:
 		if !bytes.HasPrefix(msg.Payload, []byte("OK")) {
@@ -2821,6 +2845,22 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				}
 			}
 
+			// Handle the skill mention popup if open.
+			if m.skillsPopupOpen {
+				if msg, ok := m.skillsPopup.Update(msg); ok {
+					switch msg := msg.(type) {
+					case skillselector.SelectionMsg:
+						cmds = append(cmds, m.insertSkillCompletion(msg.Value))
+						if !msg.KeepOpen {
+							m.closeSkillsPopup()
+						}
+					case skillselector.ClosedMsg:
+						m.closeSkillsPopup()
+					}
+					return tea.Batch(cmds...)
+				}
+			}
+
 			if ok := m.attachments.Update(msg); ok {
 				return tea.Batch(cmds...)
 			}
@@ -2988,12 +3028,25 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 				if msg.String() == "@" && !m.completionsOpen {
 					// Only show if beginning of prompt or after whitespace.
 					if curIdx == 0 || (curIdx > 0 && isWhitespace(curValue[curIdx-1])) {
+						m.closeSkillsPopup()
 						m.completionsOpen = true
 						m.completionsQuery = ""
 						m.completionsStartIndex = curIdx
 						m.completionsPositionStart = m.completionsPosition()
 						depth, limit := m.com.Config().Options.TUI.Completions.Limits()
 						cmds = append(cmds, m.completions.Open(depth, limit))
+					}
+				}
+
+				// Trigger the skill mention popup on its editor key binding.
+				if key.Matches(msg, m.keyMap.Editor.MentionSkill) && !m.skillsPopupOpen {
+					// Only show if beginning of prompt or after whitespace.
+					if curIdx == 0 || (curIdx > 0 && isWhitespace(curValue[curIdx-1])) {
+						m.closeCompletions()
+						m.skillsPopupOpen = true
+						m.skillsPopupStartIndex = curIdx
+						m.skillsPopupPositionStart = m.completionsPosition()
+						cmds = append(cmds, m.loadSkillItems())
 					}
 				}
 
@@ -3056,6 +3109,30 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 							m.completions.Filter(m.completionsQuery)
 						} else if m.completionsOpen {
 							m.closeCompletions()
+						}
+					}
+				}
+
+				// After updating textarea, filter the skill mention popup.
+				// Skip on the initial trigger keystroke: items load async.
+				if m.skillsPopupOpen && !key.Matches(msg, m.keyMap.Editor.MentionSkill) {
+					newValue := m.textarea.Value()
+					newIdx := len(newValue)
+
+					// Close the popup if the cursor moved before the trigger.
+					if newIdx <= m.skillsPopupStartIndex {
+						m.closeSkillsPopup()
+					} else if msg.String() == "space" {
+						// Close on space.
+						m.closeSkillsPopup()
+					} else {
+						// Extract the current word and filter on it.
+						word := m.textareaWord()
+						trigger := m.skillsPopupTrigger()
+						if strings.HasPrefix(word, trigger) {
+							m.skillsPopup.Filter(strings.TrimPrefix(word, trigger))
+						} else {
+							m.closeSkillsPopup()
 						}
 					}
 				}
@@ -3307,6 +3384,26 @@ func (m *UI) Draw(scr uv.Screen, area uv.Rectangle) *tea.Cursor {
 
 		completionsView := uv.NewStyledString(m.completions.Render())
 		completionsView.Draw(scr, image.Rectangle{
+			Min: image.Pt(x, y),
+			Max: image.Pt(x+w, y+h),
+		})
+	}
+
+	// Draw the skill mention popup if open.
+	if !isOnboarding && m.skillsPopupOpen && m.skillsPopup.HasItems() {
+		w, h := m.skillsPopup.Size()
+		x := m.skillsPopupPositionStart.X
+		y := m.skillsPopupPositionStart.Y - h
+
+		screenW := area.Dx()
+		if x+w > screenW {
+			x = screenW - w
+		}
+		x = max(0, x)
+		y = max(0, y+1) // Offset for attachments row
+
+		skillsView := uv.NewStyledString(m.skillsPopup.Render())
+		skillsView.Draw(scr, image.Rectangle{
 			Min: image.Pt(x, y),
 			Max: image.Pt(x+w, y+h),
 		})
@@ -3612,6 +3709,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			editorBinds := []key.Binding{
 				k.Editor.Newline,
 				k.Editor.MentionFile,
+				k.Editor.MentionSkill,
 				k.Editor.OpenEditor,
 				k.Editor.PasteText,
 				k.Editor.SelectAll,
@@ -3688,6 +3786,7 @@ func (m *UI) FullHelp() [][]key.Binding {
 			editorBinds := []key.Binding{
 				k.Editor.Newline,
 				k.Editor.MentionFile,
+				k.Editor.MentionSkill,
 				k.Editor.OpenEditor,
 				k.Editor.PasteText,
 				k.Editor.SelectAll,
@@ -4371,6 +4470,75 @@ func (m *UI) closeCompletions() {
 	m.completions.Close()
 }
 
+// closeSkillsPopup closes the skill mention popup and resets state.
+func (m *UI) closeSkillsPopup() {
+	m.skillsPopupOpen = false
+	m.skillsPopupStartIndex = 0
+	m.skillsPopup.Close()
+}
+
+// skillsPopupTrigger returns the trigger character of the skill mention
+// popup, taken from the rebindable editor key binding.
+func (m *UI) skillsPopupTrigger() string {
+	if keys := m.keyMap.Editor.MentionSkill.Keys(); len(keys) > 0 {
+		return keys[0]
+	}
+	return "$"
+}
+
+// loadSkillItems loads the invocable skills from the workspace catalog
+// for the skill mention popup.
+func (m *UI) loadSkillItems() tea.Cmd {
+	return func() tea.Msg {
+		entries, err := m.com.Workspace.ListSkills(context.Background())
+		if err != nil {
+			slog.Warn("Failed to load skill catalog", "error", err)
+			return skillselector.ItemsLoadedMsg{}
+		}
+		out := make([]skillselector.Skill, 0, len(entries))
+		for _, entry := range entries {
+			if !entry.UserInvocable || !entry.ModelInvocable {
+				continue
+			}
+			out = append(out, skillselector.Skill{
+				ID:          entry.ID,
+				Name:        entry.Name,
+				Description: entry.Description,
+			})
+		}
+		return skillselector.ItemsLoadedMsg{Skills: out}
+	}
+}
+
+// insertSkillCompletion replaces the trigger word in the textarea with the
+// skill mention and attaches the skill to the message.
+func (m *UI) insertSkillCompletion(skill skillselector.Skill) tea.Cmd {
+	prevHeight := m.textarea.Height()
+	if !m.insertSkillMention(skill.Name) {
+		return nil
+	}
+	heightCmd := m.handleTextareaHeightChange(prevHeight)
+	return tea.Batch(heightCmd, m.attachSkill(skill.ID, skill.Name))
+}
+
+// insertSkillMention replaces the $query word with $name, keeping the
+// literal mention in the buffer, and moves the cursor to the end.
+func (m *UI) insertSkillMention(name string) bool {
+	value := m.textarea.Value()
+	if m.skillsPopupStartIndex > len(value) {
+		return false
+	}
+
+	trigger := m.skillsPopupTrigger()
+	word := m.textareaWord()
+	endIdx := min(m.skillsPopupStartIndex+len(word), len(value))
+	newValue := value[:m.skillsPopupStartIndex] + trigger + name + value[endIdx:]
+	m.textarea.SetValue(newValue)
+	m.textarea.MoveToEnd()
+	m.textarea.InsertRune(' ')
+	return true
+}
+
 // insertCompletionText replaces the @query in the textarea with the given text.
 // Returns false if the replacement cannot be performed.
 func (m *UI) insertCompletionText(text string) bool {
@@ -4650,11 +4818,24 @@ func (m *UI) attachSkill(skillID, name string) tea.Cmd {
 		if fileName == "" {
 			fileName = name
 		}
+		info := &message.SkillInfo{
+			Name:         fileName,
+			Description:  result.Description,
+			Location:     skillID,
+			Instructions: string(content),
+		}
+		// Prefer the parsed frontmatter body so injected instructions do
+		// not include the raw frontmatter.
+		if parsed, err := skills.ParseContent(content); err == nil {
+			info.Description = parsed.Description
+			info.Instructions = parsed.Instructions
+		}
 		return message.Attachment{
 			FilePath: fileName,
 			FileName: fileName,
 			MimeType: "text/markdown",
 			Content:  content,
+			Skill:    info,
 		}
 	}
 }

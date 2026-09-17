@@ -19,12 +19,13 @@ const (
 
 // CatalogEntry describes an effective visible skill for frontend display.
 type CatalogEntry struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Description   string     `json:"description"`
-	Label         string     `json:"label"`
-	Source        SourceType `json:"source"`
-	UserInvocable bool       `json:"user_invocable"`
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Description    string     `json:"description"`
+	Label          string     `json:"label"`
+	Source         SourceType `json:"source"`
+	UserInvocable  bool       `json:"user_invocable"`
+	ModelInvocable bool       `json:"model_invocable"`
 }
 
 // SkillReadResult holds metadata about a skill returned alongside its
@@ -49,12 +50,13 @@ func Catalog(active []*Skill, skillPaths []string, workingDir string) []CatalogE
 	for _, skill := range active {
 		label, source := skillLabel(skillPaths, workingDir, skill)
 		entries = append(entries, CatalogEntry{
-			ID:            skill.SkillFilePath,
-			Name:          skill.Name,
-			Description:   skill.Description,
-			Label:         label,
-			Source:        source,
-			UserInvocable: skill.UserInvocable,
+			ID:             skill.SkillFilePath,
+			Name:           skill.Name,
+			Description:    skill.Description,
+			Label:          label,
+			Source:         source,
+			UserInvocable:  skill.IsUserInvocable(),
+			ModelInvocable: skill.IsModelInvocable(),
 		})
 	}
 	return entries
