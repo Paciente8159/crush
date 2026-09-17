@@ -9,7 +9,7 @@
 - [ ] A skill file with no user-invocable flag parses as invocable
 - [ ] A skill file with an explicit false user-invocable flag parses as not invocable
 - [ ] The resolved (boolean) invocability is what crosses the workspace, client, and backend API boundaries; the tri-state lives only inside skill parsing
-- [ ] The invocable-skill list (active skills that are user-invocable and not hidden from the model) is exposed for consumers
-- [ ] The command palette's user-commands list shows skills under the default-on rule and excludes explicit-false and model-hidden skills
+- [ ] The invocable-skill list (active skills that are user-invocable, regardless of disable-model-invocation) is exposed for consumers
+- [ ] The command palette's user-commands list shows skills under the default-on rule and excludes explicit-false skills
 - [ ] Tests at the skills-package seam cover omitted, explicit true, and explicit false frontmatter, plus the invocable list and the palette conversion
 - [ ] Existing sessions, wire formats, and persisted data are unaffected by the change

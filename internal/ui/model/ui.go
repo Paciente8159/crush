@@ -4497,7 +4497,7 @@ func (m *UI) loadSkillItems() tea.Cmd {
 		}
 		out := make([]skillselector.Skill, 0, len(entries))
 		for _, entry := range entries {
-			if !entry.UserInvocable || !entry.ModelInvocable {
+			if !entry.UserInvocable {
 				continue
 			}
 			out = append(out, skillselector.Skill{

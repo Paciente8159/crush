@@ -37,6 +37,10 @@ type CompletionItem struct {
 	normalStyle  lipgloss.Style
 	focusedStyle lipgloss.Style
 	matchStyle   lipgloss.Style
+
+	// Optional name-only filtering. When set, Filter() returns
+	// just the name (so fuzzy matching ignores description text).
+	nameOnly string
 }
 
 // NewCompletionItem creates a new completion item.
@@ -70,8 +74,17 @@ func (c *CompletionItem) Value() any {
 	return c.value
 }
 
+// SetNameOnly configures name-only filtering. When set, fuzzy matching
+// searches only the name, ignoring the description text.
+func (c *CompletionItem) SetNameOnly(name string) {
+	c.nameOnly = name
+}
+
 // Filter implements [list.FilterableItem].
 func (c *CompletionItem) Filter() string {
+	if c.nameOnly != "" {
+		return c.nameOnly
+	}
 	return c.text
 }
 

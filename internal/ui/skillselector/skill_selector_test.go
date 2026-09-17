@@ -76,7 +76,7 @@ func TestFilterRanksExactAndPrefixAboveFuzzy(t *testing.T) {
 	})
 
 	s.Filter("grill")
-	require.Equal(t, []string{"grilling", "grill-me", "xgrill"}, filteredNames(s))
+	require.Equal(t, []string{"grill-me", "grilling", "xgrill"}, filteredNames(s))
 }
 
 func TestFilterNoMatch(t *testing.T) {
