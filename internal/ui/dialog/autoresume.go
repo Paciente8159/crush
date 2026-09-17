@@ -1,6 +1,7 @@
 package dialog
 
 import (
+	"fmt"
 	"strconv"
 
 	"charm.land/bubbles/v2/help"
@@ -64,6 +65,17 @@ func NewAutoResume(com *common.Common) *AutoResume {
 	r.input.SetStyles(com.Styles.TextInput)
 	r.input.Focus()
 	r.input.SetValue(initialThreshold)
+	r.input.Validate = func(s string) error {
+		if s == "" {
+			return nil
+		}
+		for _, c := range s {
+			if c < '0' || c > '9' {
+				return fmt.Errorf("only digits allowed")
+			}
+		}
+		return nil
+	}
 
 	r.keyMap.Select = key.NewBinding(
 		key.WithKeys("enter"),
@@ -95,7 +107,7 @@ func (r *AutoResume) HandleMsg(msg tea.Msg) Action {
 				r.model = "large"
 			}
 		case key.Matches(msg, r.keyMap.Select):
-			threshold := 80
+			threshold := 100
 			if v := r.input.Value(); v != "" {
 				if n, err := strconv.Atoi(v); err == nil && n >= 0 && n <= 100 {
 					threshold = n
@@ -116,12 +128,15 @@ func (r *AutoResume) HandleMsg(msg tea.Msg) Action {
 
 // Cursor implements Dialog.
 func (r *AutoResume) Cursor() *tea.Cursor {
-	// The input's visual cursor (the blinking | character) is already
-	// rendered as part of r.input.View() inside Draw. Returning a
-	// tea.Cursor here would add a misplaced terminal cursor whose Y
-	// coordinate doesn't account for the title and model line above
-	// the input, causing it to appear one line too high.
-	return nil
+	cur := r.input.Cursor()
+	if cur == nil {
+		return nil
+	}
+	// The threshold input is the second content line in the dialog
+	// (after the title and the model line). Offset Y by 1 so the
+	// cursor appears on the correct line.
+	cur.Y += 1
+	return InputCursor(r.com.Styles, cur)
 }
 
 // Draw implements Dialog.
