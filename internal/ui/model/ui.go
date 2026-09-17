@@ -2124,6 +2124,13 @@ func (m *UI) handleDialogMsg(msg tea.Msg) tea.Cmd {
 			return nil
 		})
 		m.dialog.CloseDialog(dialog.CommandsID)
+	case dialog.ActionAutoResumeConfig:
+		if err := m.handleAutoResumeConfig(msg); err != nil {
+			cmds = append(cmds, util.ReportError(err))
+		} else {
+			cmds = append(cmds, util.CmdHandler(util.NewInfoMsg("Auto-resume settings saved")))
+		}
+		m.dialog.CloseDialog(dialog.AutoResumeID)
 	case dialog.ActionToggleHelp:
 		m.status.ToggleHelp()
 		m.dialog.CloseDialog(dialog.CommandsID)
@@ -2692,6 +2699,11 @@ func (m *UI) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			return true
 		case key.Matches(msg, m.keyMap.Sessions):
 			if cmd := m.openSessionsDialog(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+			return true
+		case key.Matches(msg, m.keyMap.AutoResume):
+			if cmd := m.openAutoResumeDialog(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 			return true
@@ -5090,6 +5102,10 @@ func (m *UI) openDialog(id string) tea.Cmd {
 		if cmd := m.openNotificationsDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
 		}
+	case dialog.AutoResumeID:
+		if cmd := m.openAutoResumeDialog(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dialog.FilePickerID:
 		if cmd := m.openFilesDialog(); cmd != nil {
 			cmds = append(cmds, cmd)
@@ -5188,6 +5204,40 @@ func (m *UI) openNotificationsDialog() tea.Cmd {
 
 	notificationsDialog := dialog.NewNotifications(m.com)
 	m.dialog.OpenDialog(notificationsDialog)
+	return nil
+}
+
+// openAutoResumeDialog opens the auto-resume configuration dialog.
+func (m *UI) openAutoResumeDialog() tea.Cmd {
+	if m.dialog.ContainsDialog(dialog.AutoResumeID) {
+		m.dialog.BringToFront(dialog.AutoResumeID)
+		return nil
+	}
+
+	m.dialog.OpenDialog(dialog.NewAutoResume(m.com))
+	return nil
+}
+
+// handleAutoResumeConfig persists auto-resume settings to the config store.
+func (m *UI) handleAutoResumeConfig(msg dialog.ActionAutoResumeConfig) error {
+	ws := m.com.Workspace
+	if ws == nil {
+		return fmt.Errorf("workspace not available")
+	}
+
+	if err := ws.SetAutoResumeThreshold(config.ScopeGlobal, msg.Threshold); err != nil {
+		return fmt.Errorf("failed to save auto-resume threshold: %w", err)
+	}
+
+	if err := ws.SetAutoResumeModel(config.ScopeGlobal, msg.Model); err != nil {
+		return fmt.Errorf("failed to save auto-resume model: %w", err)
+	}
+
+	// Saving from the dialog implies the user wants auto-resume enabled.
+	if err := ws.SetDisableAutoResume(config.ScopeGlobal, false); err != nil {
+		return fmt.Errorf("failed to enable auto-resume: %w", err)
+	}
+
 	return nil
 }
 

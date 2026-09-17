@@ -358,6 +358,18 @@ func (w *AppWorkspace) SetCompactMode(scope config.Scope, enabled bool) error {
 	return w.store.SetCompactMode(scope, enabled)
 }
 
+func (w *AppWorkspace) SetAutoResumeThreshold(scope config.Scope, threshold int) error {
+	return w.store.SetAutoResumeThreshold(scope, threshold)
+}
+
+func (w *AppWorkspace) SetAutoResumeModel(scope config.Scope, model string) error {
+	return w.store.SetAutoResumeModel(scope, model)
+}
+
+func (w *AppWorkspace) SetDisableAutoResume(scope config.Scope, disabled bool) error {
+	return w.store.SetDisableAutoResume(scope, disabled)
+}
+
 func (w *AppWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
 	if err := w.store.SetProviderAPIKey(scope, providerID, apiKey); err != nil {
 		return err

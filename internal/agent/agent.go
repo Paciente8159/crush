@@ -146,7 +146,7 @@ type SessionAgent interface {
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
-	Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
+	Summarize(context.Context, string, string, config.SelectedModelType, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
 	Model() Model
 	GenerateTitle(ctx context.Context, sessionID, userPrompt string)
 }
@@ -178,6 +178,7 @@ type sessionAgent struct {
 	sessions             session.Service
 	messages             message.Service
 	disableAutoSummarize bool
+	autoResumeEnabled    bool
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
@@ -230,6 +231,7 @@ type SessionAgentOptions struct {
 	SystemPrompt         string
 	IsSubAgent           bool
 	DisableAutoSummarize bool
+	AutoResumeEnabled    bool
 	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
@@ -250,6 +252,7 @@ func NewSessionAgent(
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
 		disableAutoSummarize: opts.DisableAutoSummarize,
+		autoResumeEnabled:    opts.AutoResumeEnabled,
 		tools:                csync.NewSliceFrom(opts.Tools),
 		isYolo:               opts.IsYolo,
 		notify:               opts.Notify,
@@ -1053,7 +1056,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				} else {
 					threshold = int64(float64(cw) * smallContextWindowRatio)
 				}
-				if (remaining <= threshold) && !a.disableAutoSummarize {
+				if (remaining <= threshold) && !a.disableAutoSummarize && !a.autoResumeEnabled {
 					shouldSummarize = true
 					return true
 				}
@@ -1199,7 +1202,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
+		if summarizeErr := a.Summarize(genCtx, call.SessionID, "", config.SelectedModelTypeLarge, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
 			return nil, summarizeErr
 		}
 		// If the agent wasn't done...
@@ -1334,14 +1337,30 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	return a.Run(ctx, firstQueuedMessage)
 }
 
-func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt string, modelType config.SelectedModelType, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
 
-	// Copy mutable fields under lock to avoid races with SetModels.
-	largeModel := a.largeModel.Get()
-	systemPromptPrefix := a.systemPromptPrefix.Get()
+	// Select the model based on modelType.
+	var model Model
+	switch modelType {
+	case config.SelectedModelTypeSmall:
+		model = a.smallModel.Get()
+	default:
+		model = a.largeModel.Get()
+	}
+
+	genCtx, cancel := context.WithCancel(ctx)
+	ac := &activeCancel{cancel: cancel}
+	a.activeRequests.Set(sessionID, ac)
+	defer a.activeRequests.CompareAndDelete(sessionID, ac)
+	defer cancel()
+	defer func() {
+		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
+			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
+		}
+	}()
 
 	currentSession, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
@@ -1356,44 +1375,45 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 		return nil
 	}
 
-	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages)
+	systemPromptPrefix := a.systemPromptPrefix.Get()
 
-	genCtx, cancel := context.WithCancel(ctx)
-	ac := &activeCancel{cancel: cancel}
-	a.activeRequests.Set(sessionID, ac)
-	defer a.activeRequests.CompareAndDelete(sessionID, ac)
-	defer cancel()
-	defer func() {
-		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
-			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
-		}
-	}()
+	// Check if chunking is needed when using a small model.
+	cw := model.CatwalkCfg.ContextWindow
+	tokens := currentSession.CompletionTokens + currentSession.PromptTokens
+	needsChunking := modelType == config.SelectedModelTypeSmall && cw > 0 && tokens > int64(float64(cw)*0.9)
 
-	agent := fantasy.NewAgent(
-		largeModel.Model,
+	if needsChunking {
+		return a.summarizeInChunks(genCtx, sessionID, prompt, model, msgs, currentSession, systemPromptPrefix, opts, onAuthRefresh)
+	}
+
+	// Single-pass summarization (existing behavior).
+	aiMsgs, _ := a.preparePrompt(msgs, model.CatwalkCfg.SupportsImages)
+
+	fAgent := fantasy.NewAgent(
+		model.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
-		Model:            largeModel.ModelCfg.Model,
-		Provider:         largeModel.ModelCfg.Provider,
+		Model:            model.ModelCfg.Model,
+		Provider:         model.ModelCfg.Provider,
 		IsSummaryMessage: true,
 	})
 	if err != nil {
 		return err
 	}
 
-	summaryPromptText := buildSummaryPrompt(currentSession.Todos)
+	summaryPromptText := buildSummaryPrompt(currentSession.Todos, prompt)
 
-	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
+	resp, err := fAgent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:          summaryPromptText,
 		Messages:        aiMsgs,
 		Headers:         sessionHeaders(sessionID),
 		ProviderOptions: opts,
 		OnAuthRefresh:   onAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
-			return a.largeModel.Get().Model
+			return model.Model
 		},
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
@@ -1407,7 +1427,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 			return a.messages.Update(genCtx, summaryMessage)
 		},
 		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
-			// Handle anthropic signature.
 			if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
 				if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
 					summaryMessage.AppendReasoningSignature(signature.Signature)
@@ -1424,12 +1443,9 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	if err != nil {
 		isCancelErr := errors.Is(err, context.Canceled)
 		if isCancelErr {
-			// User cancelled summarize we need to remove the summary message.
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
 			return deleteErr
 		}
-		// Mark the summary message as finished with an error so the UI
-		// stops spinning.
 		summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
 		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
 			return updateErr
@@ -1438,39 +1454,22 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	}
 
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-	err = a.messages.Update(genCtx, summaryMessage)
-	if err != nil {
+	if err := a.messages.Update(genCtx, summaryMessage); err != nil {
 		return err
 	}
 
-	var openrouterCost *float64
-	for _, step := range resp.Steps {
-		stepCost := a.openrouterCost(step.ProviderMetadata)
-		if stepCost != nil {
-			newCost := *stepCost
-			if openrouterCost != nil {
-				newCost += *openrouterCost
-			}
-			openrouterCost = &newCost
-		}
-		extractHyperCredits(step.ProviderMetadata)
-	}
+	a.updateSessionUsage(model, &currentSession, resp.TotalUsage, nil, false)
 
-	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
-
-	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
 	currentSession.SummaryMessageID = summaryMessage.ID
 	currentSession.CompletionTokens = summaryCompletionTokens(usage, summaryMessage)
 	currentSession.PromptTokens = 0
 	currentSession.EstimatedUsage = usageIsZero(usage)
-	_, err = a.sessions.Save(genCtx, currentSession)
-	if err != nil {
+	if _, err = a.sessions.Save(genCtx, currentSession); err != nil {
 		return err
 	}
 
-	// Release the active request before processing queued messages so that
-	// Run() does not see the session as busy.
+	// Release the active request before processing queued messages.
 	a.activeRequests.Del(sessionID)
 	cancel()
 
@@ -1483,6 +1482,241 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fan
 	a.messageQueue.Set(sessionID, queuedMessages[1:])
 	_, qErr := a.Run(ctx, firstQueuedMessage)
 	return qErr
+}
+
+// summarizeInChunks splits the conversation into chunks that fit within the
+// model's context window, summarizes each chunk greedily oldest-to-newest,
+// and prepends the accumulated summary from prior chunks before each new chunk.
+func (a *sessionAgent) summarizeInChunks(
+	ctx context.Context,
+	sessionID, prompt string,
+	model Model,
+	msgs []message.Message,
+	currentSession session.Session,
+	systemPromptPrefix string,
+	opts fantasy.ProviderOptions,
+	onAuthRefresh func(context.Context, *fantasy.ProviderError) error,
+) error {
+	cw := model.CatwalkCfg.ContextWindow
+	maxChunkTokens := int64(float64(cw) * 0.9)
+	chunkThreshold := int64(float64(cw) * 0.15)
+	usableTokens := maxChunkTokens - chunkThreshold
+
+	// Tokenize messages using a rough estimate.
+	type msgTokens struct {
+		content string
+		tokens  int64
+	}
+	var tokenized []msgTokens
+	for _, m := range msgs {
+		text := m.Content().Text
+		tok := int64(len(text)/4) + 10 // Rough estimate plus overhead.
+		if tok < 1 {
+			tok = 1
+		}
+		tokenized = append(tokenized, msgTokens{content: text, tokens: tok})
+	}
+
+	if len(tokenized) == 0 {
+		return nil
+	}
+
+	// Build chunks oldest-to-newest.
+	var chunks [][]msgTokens
+	var currentChunk []msgTokens
+	var currentTokens int64
+
+	for _, mt := range tokenized {
+		if currentTokens+mt.tokens > usableTokens && len(currentChunk) > 0 {
+			chunks = append(chunks, currentChunk)
+			currentChunk = nil
+			currentTokens = 0
+		}
+		currentChunk = append(currentChunk, mt)
+		currentTokens += mt.tokens
+	}
+	if len(currentChunk) > 0 {
+		chunks = append(chunks, currentChunk)
+	}
+
+	if len(chunks) <= 1 {
+		// Actually fits in one pass; let Summarize handle it.
+		return nil
+	}
+
+	accumulatedSummary := ""
+
+	for i, chunk := range chunks {
+		// Build fantasy messages for this chunk.
+		var chunkMsgs []fantasy.Message
+		for _, mt := range chunk {
+			chunkMsgs = append(chunkMsgs, fantasy.NewUserMessage(mt.content))
+		}
+
+		if accumulatedSummary != "" {
+			chunkMsgs = append([]fantasy.Message{
+				fantasy.NewUserMessage("Accumulated summary so far:\n\n" + accumulatedSummary),
+			}, chunkMsgs...)
+		}
+
+		chunkPrompt := ""
+		if i < len(chunks)-1 {
+			chunkPrompt = "Provide a concise summary of the following conversation segment. " +
+				"Focus on key decisions, code changes, and important context. " +
+				"Omit greetings and minor details."
+			if prompt != "" {
+				chunkPrompt += "\n\nThe user is about to ask: " + prompt
+			}
+		} else {
+			chunkPrompt = buildSummaryPrompt(currentSession.Todos, prompt)
+		}
+
+		fAgent := fantasy.NewAgent(
+			model.Model,
+			fantasy.WithSystemPrompt(string(summaryPrompt)),
+			fantasy.WithUserAgent(userAgent),
+		)
+
+		chunkResult, err := fAgent.Stream(ctx, fantasy.AgentStreamCall{
+			Prompt:          chunkPrompt,
+			Messages:        chunkMsgs,
+			Headers:         sessionHeaders(sessionID),
+			ProviderOptions: opts,
+			OnAuthRefresh:   onAuthRefresh,
+			ModelProvider: func() fantasy.LanguageModel {
+				return model.Model
+			},
+			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				prepared.Messages = options.Messages
+				if systemPromptPrefix != "" {
+					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
+				}
+				return callContext, prepared, nil
+			},
+		})
+		if err != nil {
+			slog.Error("Chunk summarization failed, falling back to large model", "chunk", i, "error", err)
+			return a.summarizeRemaining(ctx, sessionID, prompt, msgs, currentSession, opts, onAuthRefresh)
+		}
+
+		var chunkText string
+		for _, step := range chunkResult.Steps {
+			for _, content := range step.Content {
+				if text, ok := content.(fantasy.TextContent); ok {
+					chunkText += text.Text
+				}
+			}
+		}
+
+		if chunkText != "" {
+			if accumulatedSummary != "" {
+				accumulatedSummary = accumulatedSummary + "\n\n" + chunkText
+			} else {
+				accumulatedSummary = chunkText
+			}
+		}
+	}
+
+	// Final consolidation pass.
+	if accumulatedSummary != "" {
+		finalMsgs := []fantasy.Message{
+			fantasy.NewUserMessage("Full conversation summary:\n\n" + accumulatedSummary),
+		}
+
+		finalPrompt := buildSummaryPrompt(currentSession.Todos, prompt)
+
+		summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
+			Role:             message.Assistant,
+			Model:            model.ModelCfg.Model,
+			Provider:         model.ModelCfg.Provider,
+			IsSummaryMessage: true,
+		})
+		if err != nil {
+			return err
+		}
+
+		fAgent := fantasy.NewAgent(
+			model.Model,
+			fantasy.WithSystemPrompt(string(summaryPrompt)),
+			fantasy.WithUserAgent(userAgent),
+		)
+
+		resp, err := fAgent.Stream(ctx, fantasy.AgentStreamCall{
+			Prompt:          finalPrompt,
+			Messages:        finalMsgs,
+			Headers:         sessionHeaders(sessionID),
+			ProviderOptions: opts,
+			OnAuthRefresh:   onAuthRefresh,
+			ModelProvider: func() fantasy.LanguageModel {
+				return model.Model
+			},
+			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
+				prepared.Messages = options.Messages
+				if systemPromptPrefix != "" {
+					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
+				}
+				return callContext, prepared, nil
+			},
+			OnReasoningDelta: func(id string, text string) error {
+				summaryMessage.AppendReasoningContent(text)
+				return a.messages.Update(ctx, summaryMessage)
+			},
+			OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
+				if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
+					if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
+						summaryMessage.AppendReasoningSignature(signature.Signature)
+					}
+				}
+				summaryMessage.FinishThinking()
+				return a.messages.Update(ctx, summaryMessage)
+			},
+			OnTextDelta: func(id, text string) error {
+				summaryMessage.AppendContent(text)
+				return a.messages.Update(ctx, summaryMessage)
+			},
+		})
+		if err != nil {
+			isCancelErr := errors.Is(err, context.Canceled)
+			if isCancelErr {
+				return a.messages.Delete(ctx, summaryMessage.ID)
+			}
+			summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
+			if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
+				return updateErr
+			}
+			return a.summarizeRemaining(ctx, sessionID, prompt, msgs, currentSession, opts, onAuthRefresh)
+		}
+
+		summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
+		if err := a.messages.Update(ctx, summaryMessage); err != nil {
+			return err
+		}
+
+		a.updateSessionUsage(model, &currentSession, resp.TotalUsage, nil, false)
+
+		usage := resp.Response.Usage
+		currentSession.SummaryMessageID = summaryMessage.ID
+		currentSession.CompletionTokens = summaryCompletionTokens(usage, summaryMessage)
+		currentSession.PromptTokens = 0
+		currentSession.EstimatedUsage = usageIsZero(usage)
+		if _, err = a.sessions.Save(ctx, currentSession); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// summarizeRemaining falls back to the large model for a single-pass summarization.
+func (a *sessionAgent) summarizeRemaining(
+	ctx context.Context,
+	sessionID, prompt string,
+	msgs []message.Message,
+	currentSession session.Session,
+	opts fantasy.ProviderOptions,
+	onAuthRefresh func(context.Context, *fantasy.ProviderError) error,
+) error {
+	return a.Summarize(ctx, sessionID, prompt, config.SelectedModelTypeLarge, opts, onAuthRefresh)
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
@@ -2285,9 +2519,14 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
-func buildSummaryPrompt(todos []session.Todo) string {
+func buildSummaryPrompt(todos []session.Todo, prompt string) string {
 	var sb strings.Builder
 	sb.WriteString("Provide a detailed summary of our conversation above.")
+	if prompt != "" {
+		sb.WriteString("\n\nThe user is about to ask: ")
+		sb.WriteString(prompt)
+		sb.WriteString("\n\nKeep this in mind when summarizing \u2014 preserve context relevant to the upcoming request.")
+	}
 	if len(todos) > 0 {
 		sb.WriteString("\n\n## Current Todo List\n\n")
 		for _, t := range todos {

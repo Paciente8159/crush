@@ -458,6 +458,9 @@ func (c *Commands) defaultCommands() []*CommandItem {
 		commands = append(commands, NewCommandItem(c.com.Styles, "summarize", "Summarize Session", "", ActionSummarize{SessionID: c.sessionID}))
 	}
 
+	// Auto Resume is always available — even without an active session.
+	commands = append(commands, NewCommandItem(c.com.Styles, "auto_resume", "Auto Resume Session", "ctrl+a", ActionOpenDialog{DialogID: AutoResumeID}))
+
 	// Add reasoning toggle for models that support it
 	cfg := c.com.Config()
 	if agentCfg, ok := cfg.Agents[config.AgentCoder]; ok {

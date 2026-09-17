@@ -271,6 +271,36 @@ func TestCrushInfo_AutoSummarizeInversion(t *testing.T) {
 	require.Contains(t, outputTrue, "auto_summarize = true")
 }
 
+func TestCrushInfo_AutoResumeDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.NewTestStore(&config.Config{
+		Providers: csync.NewMap[string, config.ProviderConfig](),
+		Options:   &config.Options{},
+	})
+	output := buildCrushInfo(cfg, nil, nil, nil, nil)
+	require.Contains(t, output, "auto_resume = true")
+	require.Contains(t, output, "auto_resume_threshold = 0")
+	require.Contains(t, output, "auto_resume_model = ")
+}
+
+func TestCrushInfo_AutoResumeCustomValues(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.NewTestStore(&config.Config{
+		Providers: csync.NewMap[string, config.ProviderConfig](),
+		Options: &config.Options{
+			DisableAutoResume:   true,
+			AutoResumeThreshold: 80,
+			AutoResumeModel:     "small",
+		},
+	})
+	output := buildCrushInfo(cfg, nil, nil, nil, nil)
+	require.Contains(t, output, "auto_resume = false")
+	require.Contains(t, output, "auto_resume_threshold = 80")
+	require.Contains(t, output, "auto_resume_model = small")
+}
+
 func TestCrushInfo_NoSecrets(t *testing.T) {
 	t.Parallel()
 

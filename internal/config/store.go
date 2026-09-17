@@ -566,6 +566,30 @@ func (s *ConfigStore) SetTransparentBackground(scope Scope, enabled bool) error 
 	})
 }
 
+// SetAutoResumeThreshold sets the auto-resume context threshold and persists it.
+func (s *ConfigStore) SetAutoResumeThreshold(scope Scope, threshold int) error {
+	return s.update(scope, func(c *Config) map[string]any {
+		c.ensureOptions().AutoResumeThreshold = threshold
+		return map[string]any{"options.auto_resume_threshold": threshold}
+	})
+}
+
+// SetAutoResumeModel sets the auto-resume model choice and persists it.
+func (s *ConfigStore) SetAutoResumeModel(scope Scope, model string) error {
+	return s.update(scope, func(c *Config) map[string]any {
+		c.ensureOptions().AutoResumeModel = model
+		return map[string]any{"options.auto_resume_model": model}
+	})
+}
+
+// SetDisableAutoResume sets the auto-resume enabled/disabled state and persists it.
+func (s *ConfigStore) SetDisableAutoResume(scope Scope, disabled bool) error {
+	return s.update(scope, func(c *Config) map[string]any {
+		c.ensureOptions().DisableAutoResume = disabled
+		return map[string]any{"options.disable_auto_resume": disabled}
+	})
+}
+
 // SetProviderAPIKey sets the API key for a provider and persists it.
 // The OpenAI provider holds exactly one credential: storing a ChatGPT
 // token removes a previously entered API key, and storing an API key

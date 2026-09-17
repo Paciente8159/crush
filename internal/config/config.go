@@ -398,6 +398,9 @@ type Options struct {
 	Notifications             string       `json:"notifications,omitempty" jsonschema:"description=Notification style to use. Options: auto (default)\\, native\\, osc\\, bell\\, disabled. Auto selects based on environment: native for local sessions\\, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
 	RequestTimeout            *int         `json:"request_timeout,omitempty" jsonschema:"description=Timeout in seconds for each LLM API request. Streaming responses are aborted only after this much inactivity\\, so slow but active streams are never killed. 0 disables it\\, negative values are invalid.,default=60,example=120,example=300,example=0"`
+	DisableAutoResume         bool         `json:"disable_auto_resume,omitempty" jsonschema:"description=Disable automatic conversation resumption,default=false"`
+	AutoResumeThreshold       int          `json:"auto_resume_threshold,omitempty" jsonschema:"description=Context threshold percentage (0-100) that triggers automatic conversation resumption before the next prompt,default=100"`
+	AutoResumeModel           string       `json:"auto_resume_model,omitempty" jsonschema:"description=Model to use for automatic conversation resumption,enum=large,enum=small,default=large"`
 }
 
 // DefaultRequestTimeout bounds each LLM API request when the user has not
@@ -420,6 +423,26 @@ func (o *Options) GetRequestTimeout() time.Duration {
 		return 0
 	}
 	return time.Duration(*o.RequestTimeout) * time.Second
+}
+
+// GetAutoResumeThreshold returns the effective auto-resume threshold.
+// A nil receiver, an unset field (0), or a value outside 1–100 all
+// return 100, which effectively disables auto-resume (the threshold
+// can never be met). Values 1–99 are used as-is.
+func (o *Options) GetAutoResumeThreshold() int {
+	if o == nil || o.AutoResumeThreshold < 1 || o.AutoResumeThreshold > 99 {
+		return 100
+	}
+	return o.AutoResumeThreshold
+}
+
+// IsAutoResumeEnabled returns true when auto-resume is not explicitly
+// disabled and the threshold is set below 100 so it can actually trigger.
+func (o *Options) IsAutoResumeEnabled() bool {
+	if o == nil || o.DisableAutoResume {
+		return false
+	}
+	return o.GetAutoResumeThreshold() < 100
 }
 
 type MCPs map[string]MCPConfig
@@ -817,6 +840,15 @@ func (c *Config) ensureTUI() *TUIOptions {
 		c.Options.TUI = &TUIOptions{}
 	}
 	return c.Options.TUI
+}
+
+// ensureOptions returns c.Options, allocating it if nil so callers can
+// assign options fields without nil checks.
+func (c *Config) ensureOptions() *Options {
+	if c.Options == nil {
+		c.Options = &Options{}
+	}
+	return c.Options
 }
 
 func (c *Config) EnabledProviders() []ProviderConfig {
