@@ -396,6 +396,28 @@ func (c *coordinator) run(ctx context.Context, accept *AcceptedRun, sessionID st
 			OnAuthRefresh:     c.makeAuthRefreshCallback(providerCfg),
 		})
 	}
+
+	// Pre-send check: if auto-resume is enabled and the session is past the
+	// configured threshold, run summarization with prompt guidance before
+	// dispatching the user's prompt.
+	if opts := c.cfg.Config().Options; opts.IsAutoResumeEnabled() {
+		currentSession, err := c.sessions.Get(ctx, sessionID)
+		if err == nil {
+			cw := model.CatwalkCfg.ContextWindow
+			if cw > 0 {
+				tokens := currentSession.CompletionTokens + currentSession.PromptTokens
+				threshold := opts.GetAutoResumeThreshold()
+				if float64(tokens)/float64(cw)*100 >= float64(threshold) {
+					modelType := config.SelectedModelTypeLarge
+					if opts.AutoResumeModel == "small" {
+						modelType = config.SelectedModelTypeSmall
+					}
+					_ = agent.Summarize(ctx, sessionID, prompt, modelType, mergedOptions, c.makeAuthRefreshCallback(providerCfg))
+				}
+			}
+		}
+	}
+
 	beforeLoaded := c.skillTracker.LoadedNames()
 	result, originalErr := run()
 	logTurnSkillUsage(sessionID, prompt, c.activeSkills, c.skillTracker, beforeLoaded)
@@ -761,6 +783,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
 		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		AutoResumeEnabled:    c.cfg.Config().Options.IsAutoResumeEnabled(),
 		IsYolo:               c.permissions.SkipRequests(),
 		Sessions:             c.sessions,
 		Messages:             c.messages,
@@ -1439,7 +1462,7 @@ func (c *coordinator) Summarize(ctx context.Context, sessionID string) error {
 
 	// Auth failures during summarize flow through fantasy's OnAuthRefresh,
 	// the same path used by regular turns.
-	return agent.Summarize(ctx, sessionID, getProviderOptions(agent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
+	return agent.Summarize(ctx, sessionID, "", config.SelectedModelTypeLarge, getProviderOptions(agent.Model(), providerCfg), c.makeAuthRefreshCallback(providerCfg))
 }
 
 // GenerateTitle generates a session title using the current agent.

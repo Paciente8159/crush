@@ -257,3 +257,107 @@ func TestOption_RequestTimeoutInvalid(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "expects a number of seconds")
 }
+
+func TestOption_AutoResume(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume true`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, false, opts["disable_auto_resume"])
+}
+
+func TestOption_AutoResumeDisabled(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume false`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, true, opts["disable_auto_resume"])
+}
+
+func TestOption_AutoResumeThreshold(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume-threshold 80`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, float64(80), opts["auto_resume_threshold"])
+}
+
+func TestOption_AutoResumeModel(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume-model small`
+	path := filepath.Join(dir, "crushrc")
+
+	jsonBytes, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.NoError(t, err)
+
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(jsonBytes, &result))
+
+	opts := result["options"].(map[string]any)
+	require.Equal(t, "small", opts["auto_resume_model"])
+}
+
+func TestOption_AutoResumeModelInvalid(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume-model medium`
+	path := filepath.Join(dir, "crushrc")
+
+	_, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expects large or small")
+}
+
+func TestOption_AutoResumeThresholdInvalid(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume-threshold 150`
+	path := filepath.Join(dir, "crushrc")
+
+	_, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "between 0 and 100")
+}
+
+func TestOption_AutoResumeThresholdNonNumeric(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	script := `option auto-resume-threshold lots`
+	path := filepath.Join(dir, "crushrc")
+
+	_, err := LoadShellConfig(t.Context(), path, []byte(script))
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "expects a number")
+}

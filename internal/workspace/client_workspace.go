@@ -550,6 +550,30 @@ func (w *ClientWorkspace) SetCompactMode(scope config.Scope, enabled bool) error
 	return err
 }
 
+func (w *ClientWorkspace) SetAutoResumeThreshold(scope config.Scope, threshold int) error {
+	err := w.client.SetConfigField(context.Background(), w.workspaceID(), scope, "options.auto_resume_threshold", threshold)
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
+func (w *ClientWorkspace) SetAutoResumeModel(scope config.Scope, model string) error {
+	err := w.client.SetConfigField(context.Background(), w.workspaceID(), scope, "options.auto_resume_model", model)
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
+func (w *ClientWorkspace) SetDisableAutoResume(scope config.Scope, disabled bool) error {
+	err := w.client.SetConfigField(context.Background(), w.workspaceID(), scope, "options.disable_auto_resume", disabled)
+	if err == nil {
+		w.refreshWorkspace()
+	}
+	return err
+}
+
 func (w *ClientWorkspace) SetProviderAPIKey(scope config.Scope, providerID string, apiKey any) error {
 	err := w.client.SetProviderAPIKey(context.Background(), w.workspaceID(), scope, providerID, apiKey)
 	if err == nil {

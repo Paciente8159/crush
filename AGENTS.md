@@ -232,3 +232,17 @@ func CharmtonePantera() Styles {
 **Adding a new theme**: Add a function in `themes.go` that returns the
 result of `quickStyle` with a `quickStyleOpts` palette (plus any needed
 overrides), then wire it into `ThemeForProvider`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live as markdown files under `.scratch/<feature>/`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles map 1:1 to their names. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (one `CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.

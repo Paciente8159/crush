@@ -109,6 +109,36 @@ func handleOption(ctx context.Context, args []string, stdin io.Reader, stdout, s
 		return nil
 	}
 
+	if key == "auto-resume-model" {
+		if val == "" {
+			return usage(stderr, "option: auto-resume-model requires a value")
+		}
+		switch val {
+		case "large", "small":
+		default:
+			return usage(stderr, fmt.Sprintf("option: auto-resume-model expects large or small, got %q", val))
+		}
+		o["auto_resume_model"] = val
+		slog.Info("Option set in shell config", "key", key, "value", val)
+		return nil
+	}
+
+	if key == "auto-resume-threshold" {
+		if val == "" {
+			return usage(stderr, "option: auto-resume-threshold requires a value")
+		}
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return usage(stderr, fmt.Sprintf("option: auto-resume-threshold expects a number (0-100), got %q", val))
+		}
+		if n < 0 || n > 100 {
+			return usage(stderr, fmt.Sprintf("option: auto-resume-threshold expects a value between 0 and 100, got %d", n))
+		}
+		o["auto_resume_threshold"] = n
+		slog.Info("Option set in shell config", "key", key, "value", n)
+		return nil
+	}
+
 	spec, ok := optionSpecs[key]
 	if !ok {
 		return usage(stderr, fmt.Sprintf("option: unknown key %q", key))
@@ -202,16 +232,19 @@ var optionSpecs = map[string]optionSpec{
 	// Boolean fields exposed positively but stored as their negation.
 	"metrics":              {jsonKey: "disable_metrics", kind: optBool, inverted: true},
 	"auto-summarize":       {jsonKey: "disable_auto_summarize", kind: optBool, inverted: true},
+	"auto-resume":          {jsonKey: "disable_auto_resume", kind: optBool, inverted: true},
 	"provider-auto-update": {jsonKey: "disable_provider_auto_update", kind: optBool, inverted: true},
 	"default-providers":    {jsonKey: "disable_default_providers", kind: optBool, inverted: true},
 
 	// String fields.
-	"notifications":  {jsonKey: "notifications", kind: optString},
-	"data-directory": {jsonKey: "data_directory", kind: optString},
-	"initialize-as":  {jsonKey: "initialize_as", kind: optString},
+	"notifications":           {jsonKey: "notifications", kind: optString},
+	"data-directory":          {jsonKey: "data_directory", kind: optString},
+	"initialize-as":           {jsonKey: "initialize_as", kind: optString},
+	"auto-resume-model":       {jsonKey: "auto_resume_model", kind: optString},
 
 	// Integer fields, in seconds.
 	"request-timeout": {jsonKey: "request_timeout", kind: optInt},
+	"auto-resume-threshold": {jsonKey: "auto_resume_threshold", kind: optInt},
 
 	// List fields. Keys are singular because each call appends one value.
 	"context-path":        {jsonKey: "context_paths", kind: optList},

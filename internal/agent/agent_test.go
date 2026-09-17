@@ -636,6 +636,33 @@ func makeTestTodos(n int) []session.Todo {
 	return todos
 }
 
+func TestBuildSummaryPrompt_PromptInjection(t *testing.T) {
+	t.Parallel()
+
+	// With prompt guidance.
+	result := buildSummaryPrompt(nil, "fix the login bug")
+	require.Contains(t, result, "about to ask")
+	require.Contains(t, result, "fix the login bug")
+	require.Contains(t, result, "preserve context")
+
+	// Without prompt (backward compat).
+	result = buildSummaryPrompt(nil, "")
+	require.NotContains(t, result, "about to ask")
+	require.Contains(t, result, "Provide a detailed summary")
+
+	// With todos only (no prompt).
+	todos := []session.Todo{{Status: session.TodoStatusPending, Content: "Do something"}}
+	result = buildSummaryPrompt(todos, "")
+	require.Contains(t, result, "Current Todo List")
+	require.NotContains(t, result, "about to ask")
+
+	// With todos and prompt.
+	result = buildSummaryPrompt(todos, "refactor the auth module")
+	require.Contains(t, result, "about to ask")
+	require.Contains(t, result, "refactor the auth module")
+	require.Contains(t, result, "Current Todo List")
+}
+
 func BenchmarkBuildSummaryPrompt(b *testing.B) {
 	cases := []struct {
 		name     string
@@ -653,7 +680,7 @@ func BenchmarkBuildSummaryPrompt(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			b.ReportAllocs()
 			for range b.N {
-				_ = buildSummaryPrompt(todos)
+				_ = buildSummaryPrompt(todos, "")
 			}
 		})
 	}
