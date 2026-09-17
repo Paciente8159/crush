@@ -10,6 +10,9 @@ type Attachment struct {
 	FileName string
 	MimeType string
 	Content  []byte
+	// Skill describes a skill attachment; when set the attachment is
+	// rendered as a <loaded_skill> block instead of a plain file.
+	Skill *SkillInfo
 }
 
 func (a Attachment) IsText() bool     { return strings.HasPrefix(a.MimeType, "text/") }

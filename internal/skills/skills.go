@@ -38,7 +38,7 @@ var (
 type Skill struct {
 	Name                   string            `yaml:"name" json:"name"`
 	Description            string            `yaml:"description" json:"description"`
-	UserInvocable          bool              `yaml:"user-invocable" json:"user_invocable"`
+	UserInvocable          *bool             `yaml:"user-invocable" json:"user_invocable"`
 	DisableModelInvocation bool              `yaml:"disable-model-invocation" json:"disable_model_invocation"`
 	License                string            `yaml:"license,omitempty" json:"license,omitempty"`
 	Compatibility          string            `yaml:"compatibility,omitempty" json:"compatibility,omitempty"`
@@ -112,6 +112,19 @@ func SetLatestStates(states []*SkillState) {
 	latestStatesMu.Lock()
 	latestStates = cloneStates(states)
 	latestStatesMu.Unlock()
+}
+
+// IsUserInvocable reports whether the skill can be invoked by the user.
+// The user-invocable flag is tri-state: an omitted value means the skill
+// is invocable; only an explicit false opts the skill out.
+func (s *Skill) IsUserInvocable() bool {
+	return s.UserInvocable == nil || *s.UserInvocable
+}
+
+// IsModelInvocable reports whether the skill is visible to the model in the
+// system prompt.
+func (s *Skill) IsModelInvocable() bool {
+	return !s.DisableModelInvocation
 }
 
 // Validate checks if the skill meets spec requirements.

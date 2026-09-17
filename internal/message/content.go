@@ -94,6 +94,35 @@ type BinaryContent struct {
 	Path     string
 	MIMEType string
 	Data     []byte
+	// Skill describes a skill attached by the user; when set the part is
+	// rendered as a <loaded_skill> block instead of a plain file.
+	Skill *SkillInfo `json:"skill,omitempty"`
+}
+
+// SkillInfo describes a skill attached to a message so its instructions can
+// be re-injected into the prompt on every turn.
+type SkillInfo struct {
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	Location     string `json:"location,omitempty"`
+	Instructions string `json:"instructions"`
+}
+
+var skillEscape = strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", "\"", "&quot;", "'", "&apos;")
+
+// FormatLoadedSkill renders the skill as a <loaded_skill> XML block for
+// prompt injection.
+func (s *SkillInfo) FormatLoadedSkill() string {
+	var sb strings.Builder
+	sb.WriteString("<loaded_skill>\n")
+	fmt.Fprintf(&sb, "  <name>%s</name>\n", skillEscape.Replace(s.Name))
+	fmt.Fprintf(&sb, "  <description>%s</description>\n", skillEscape.Replace(s.Description))
+	fmt.Fprintf(&sb, "  <location>%s</location>\n", skillEscape.Replace(s.Location))
+	sb.WriteString("  <instructions>\n")
+	sb.WriteString(skillEscape.Replace(s.Instructions))
+	sb.WriteString("\n  </instructions>\n")
+	sb.WriteString("</loaded_skill>")
+	return sb.String()
 }
 
 func (bc BinaryContent) String(p catwalk.InferenceProvider) string {
@@ -522,7 +551,18 @@ func PromptWithTextAttachments(prompt string, attachments []Attachment) string {
 	var sb strings.Builder
 	sb.WriteString(prompt)
 	addedAttachments := false
+	addedSkills := false
 	for _, content := range attachments {
+		if content.Skill != nil {
+			if !addedSkills {
+				sb.WriteString("\n<system_info>The skills below were attached by the user to this message. Follow their instructions.</system_info>\n")
+				addedSkills = true
+			}
+			sb.WriteString("\n")
+			sb.WriteString(content.Skill.FormatLoadedSkill())
+			sb.WriteString("\n")
+			continue
+		}
 		if !content.IsText() {
 			continue
 		}
@@ -557,6 +597,7 @@ func (m *Message) ToAIMessage() []fantasy.Message {
 				FilePath: content.Path,
 				MimeType: content.MIMEType,
 				Content:  content.Data,
+				Skill:    content.Skill,
 			})
 		}
 		text = PromptWithTextAttachments(text, textAttachments)

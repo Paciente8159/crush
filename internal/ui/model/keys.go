@@ -10,7 +10,9 @@ type KeyMap struct {
 		AddImage    key.Binding
 		PasteImage  key.Binding
 		MentionFile key.Binding
-		Commands    key.Binding
+		// MentionSkill opens the skill-mention popup.
+		MentionSkill key.Binding
+		Commands     key.Binding
 
 		// Attachments key maps
 		AttachmentDeleteMode key.Binding
@@ -162,6 +164,10 @@ func DefaultKeyMap() KeyMap {
 	km.Editor.MentionFile = key.NewBinding(
 		key.WithKeys("@"),
 		key.WithHelp("@", "mention file"),
+	)
+	km.Editor.MentionSkill = key.NewBinding(
+		key.WithKeys("$"),
+		key.WithHelp("$", "mention skill"),
 	)
 	km.Editor.Commands = key.NewBinding(
 		key.WithKeys("/"),

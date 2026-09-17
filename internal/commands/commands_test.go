@@ -82,6 +82,25 @@ func TestFromSkillCatalog_UserInvocableOnly(t *testing.T) {
 	require.Equal(t, "/skills/on/SKILL.md", cmds[0].Skill.SkillFilePath)
 }
 
+func TestFromSkillCatalog_ParsedOmittedFlagIsInvocable(t *testing.T) {
+	t.Parallel()
+
+	// A skill whose frontmatter omits user-invocable must surface in the
+	// / palette: the tri-state default is invocable.
+	skill, err := skills.ParseContent([]byte(`---
+name: omitted-flag
+description: No user-invocable flag present.
+---
+body
+`))
+	require.NoError(t, err)
+	skill.SkillFilePath = "/skills/omitted-flag/SKILL.md"
+
+	cmds := FromSkillCatalog(skills.Catalog([]*skills.Skill{skill}, nil, ""))
+	require.Len(t, cmds, 1)
+	require.Equal(t, "user:omitted-flag", cmds[0].ID)
+}
+
 func TestFromSkillCatalog_UsesDiscoveredSymlinkedSkills(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation requires special privileges on Windows")
