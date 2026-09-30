@@ -95,7 +95,12 @@ type (
 		Name string
 	}
 	ActionInitializeProject struct{}
-	ActionSummarize         struct {
+	// ActionAutoResumeConfig represents changes to auto-resume settings.
+	ActionAutoResumeConfig struct {
+		Threshold int
+		Model     string
+	}
+	ActionSummarize struct {
 		SessionID string
 	}
 	// ActionSelectReasoningEffort is a message indicating a reasoning effort
