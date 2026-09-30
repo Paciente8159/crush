@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -84,6 +83,7 @@ type SessionAgentCall struct {
 	// session that may be busy) MUST set it; SessionID alone is
 	// ambiguous when concurrent turns share the same session.
 	RunID             string
+	Channel           string
 	HiddenUserMessage bool
 	Prompt            string
 	ProviderOptions   fantasy.ProviderOptions
@@ -131,6 +131,38 @@ type SessionAgentCall struct {
 	// fantasy retries the stream transparently. Returning an error
 	// surfaces the original auth error without retry.
 	OnAuthRefresh func(ctx context.Context, err *fantasy.ProviderError) error
+	// channelMeta holds the attributes of the <channel> element a
+	// channel-originated turn was started with, parsed once at Run
+	// entry. It survives the auto-summarize continuation, whose Prompt
+	// is rewritten and no longer carries the element, so the reply
+	// target is not lost when a long channel turn is summarized.
+	channelMeta map[string]string
+}
+
+// filterToolsForChannel scopes the tool list for a turn. A channel-originated
+// turn (channel != "") sees only the originating channel server's tools plus
+// all non-channel tools — the model's reach is restricted to the channel it
+// is replying through, so it cannot accidentally send via a different
+// messaging backend. A local turn (channel == "") keeps every tool,
+// including channel server tools, so a user in the TUI can still ask the
+// agent to send a message through Signal or any other enabled channel.
+func filterToolsForChannel(agentTools []fantasy.AgentTool, channel string, states map[string]mcp.ClientInfo) []fantasy.AgentTool {
+	if channel == "" {
+		return agentTools
+	}
+	filtered := make([]fantasy.AgentTool, 0, len(agentTools))
+	for _, agentTool := range agentTools {
+		mcpTool, ok := agentTool.(interface{ MCP() string })
+		if !ok {
+			filtered = append(filtered, agentTool)
+			continue
+		}
+		state, found := states[mcpTool.MCP()]
+		if !found || !state.Channel || channel == mcpTool.MCP() {
+			filtered = append(filtered, agentTool)
+		}
+	}
+	return filtered
 }
 
 type SessionAgent interface {
@@ -146,7 +178,7 @@ type SessionAgent interface {
 	QueuedPrompts(sessionID string) int
 	QueuedPromptsList(sessionID string) []string
 	ClearQueue(sessionID string)
-	Summarize(context.Context, string, string, config.SelectedModelType, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
+	Summarize(context.Context, string, fantasy.ProviderOptions, func(context.Context, *fantasy.ProviderError) error) error
 	Model() Model
 	GenerateTitle(ctx context.Context, sessionID, userPrompt string)
 }
@@ -174,11 +206,14 @@ type sessionAgent struct {
 	systemPrompt       *csync.Value[string]
 	tools              *csync.Slice[fantasy.AgentTool]
 
-	isSubAgent           bool
-	sessions             session.Service
-	messages             message.Service
+	isSubAgent bool
+	sessions   session.Service
+	messages   message.Service
+	// cfg backs channel reply routing (config lookup + MCP tool
+	// invocation). Nil in tests and sub-agents that never see channel
+	// turns; sendChannelReply treats nil as "routing disabled".
+	cfg                  *config.ConfigStore
 	disableAutoSummarize bool
-	autoResumeEnabled    bool
 	isYolo               bool
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
@@ -231,10 +266,10 @@ type SessionAgentOptions struct {
 	SystemPrompt         string
 	IsSubAgent           bool
 	DisableAutoSummarize bool
-	AutoResumeEnabled    bool
 	IsYolo               bool
 	Sessions             session.Service
 	Messages             message.Service
+	Cfg                  *config.ConfigStore
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
 	RunComplete          pubsub.Publisher[notify.RunComplete]
@@ -251,8 +286,8 @@ func NewSessionAgent(
 		isSubAgent:           opts.IsSubAgent,
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
+		cfg:                  opts.Cfg,
 		disableAutoSummarize: opts.DisableAutoSummarize,
-		autoResumeEnabled:    opts.AutoResumeEnabled,
 		tools:                csync.NewSliceFrom(opts.Tools),
 		isYolo:               opts.IsYolo,
 		notify:               opts.Notify,
@@ -572,6 +607,10 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		return nil, err
 	}
 
+	if call.Channel != "" && call.channelMeta == nil {
+		call.channelMeta, _ = parseChannelMeta(call.Prompt)
+	}
+
 	// genCtx/cancel are the run context and its cancel func, created under
 	// the per-session dispatch mutex below so a concurrent Cancel can observe
 	// the activeRequests entry before the assistant message exists.
@@ -661,7 +700,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	defer a.activeRequests.CompareAndDelete(call.SessionID, ac)
 
 	// Copy mutable fields under lock to avoid races with SetTools/SetModels.
-	agentTools := a.tools.Copy()
+	agentTools := filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates())
 	largeModel := a.largeModel.Get()
 	systemPrompt := a.systemPrompt.Get()
 	promptPrefix := a.systemPromptPrefix.Get()
@@ -792,6 +831,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
 	sanitizedToolCalls := make(map[string]bool)
+	// Full names of tool calls that completed without error this turn.
+	// Written only from the streaming callbacks (which run sequentially)
+	// and read after Stream returns, where sendChannelReply uses it to
+	// tell whether the model already replied on the originating channel.
+	completedToolCalls := make(map[string]struct{})
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
 	if call.MaxOutputTokens > 0 {
@@ -815,8 +859,13 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				prepared.Messages[i].ProviderOptions = nil
 			}
 
-			// Use latest tools (updated by SetTools when MCP tools change).
-			prepared.Tools = a.tools.Copy()
+			// Use latest tools (updated by SetTools when MCP tools
+			// change), filtered for the session's channel and minus MCP
+			// servers disabled for this repository.
+			prepared.Tools = a.filterDisabledMCPTools(
+				callContext,
+				filterToolsForChannel(a.tools.Copy(), call.Channel, mcp.GetStates()),
+			)
 
 			// Drain queued follow-up prompts for this step. Calls covered
 			// by a cancel recorded while they sat in the queue are dropped:
@@ -876,6 +925,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return callContext, prepared, err
 			}
 			callContext = context.WithValue(callContext, tools.MessageIDContextKey, assistantMsg.ID)
+			callContext = context.WithValue(callContext, tools.ChannelContextKey, call.Channel)
 			callContext = context.WithValue(callContext, tools.SupportsImagesContextKey, largeModel.CatwalkCfg.SupportsImages)
 			callContext = context.WithValue(callContext, tools.ModelNameContextKey, largeModel.CatwalkCfg.Name)
 			currentAssistant = &assistantMsg
@@ -974,6 +1024,9 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				toolResult.Content = "Tool call failed: arguments were not valid JSON. Please check your tool call format and try again."
 				toolResult.IsError = true
 			}
+			if !toolResult.IsError && toolResult.Name != "" {
+				completedToolCalls[toolResult.Name] = struct{}{}
+			}
 			// Use parent ctx instead of genCtx to ensure the message is created
 			// even if the request is canceled mid-stream
 			_, createMsgErr := a.messages.Create(ctx, currentAssistant.SessionID, message.CreateMessageParams{
@@ -1032,7 +1085,6 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			}
 			usage, estimated := fallbackStepUsage(stepMessages, stepResult)
 			a.updateSessionUsage(largeModel, &updatedSession, usage, a.openrouterCost(stepResult.ProviderMetadata), estimated)
-			extractHyperCredits(stepResult.ProviderMetadata)
 			_, sessionErr := a.sessions.Save(ctx, updatedSession)
 			if sessionErr != nil {
 				return sessionErr
@@ -1056,7 +1108,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				} else {
 					threshold = int64(float64(cw) * smallContextWindowRatio)
 				}
-				if (remaining <= threshold) && !a.disableAutoSummarize && !a.autoResumeEnabled {
+				if (remaining <= threshold) && !a.disableAutoSummarize {
 					shouldSummarize = true
 					return true
 				}
@@ -1197,12 +1249,21 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		if updateErr != nil {
 			return nil, updateErr
 		}
+		// A channel-originated turn has no caller watching the error, so
+		// tell the channel side something went wrong instead of leaving
+		// the sender hanging. sendChannelReply detaches from the run
+		// context so the notice survives a provider error that tore it down.
+		if channelErrorReplyWanted(call.Channel, err) {
+			a.sendChannelReply(ctx, call,
+				"Something went wrong while handling your message. Please try again.",
+				completedToolCalls)
+		}
 		return nil, err
 	}
 
 	if shouldSummarize {
 		a.activeRequests.Del(call.SessionID)
-		if summarizeErr := a.Summarize(genCtx, call.SessionID, "", config.SelectedModelTypeLarge, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
+		if summarizeErr := a.Summarize(genCtx, call.SessionID, call.ProviderOptions, call.OnAuthRefresh); summarizeErr != nil {
 			return nil, summarizeErr
 		}
 		// If the agent wasn't done...
@@ -1215,6 +1276,16 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			existing = append(existing, call)
 			a.messageQueue.Set(call.SessionID, existing)
 		}
+	}
+
+	// Route the finished turn's response back to the channel it came
+	// from, unless the turn was cut short for summarization with work
+	// still pending — the queued continuation carries the channel and
+	// replies when it actually finishes. Runs before the busy state is
+	// released so a follow-up push queued behind this turn cannot
+	// overtake its reply.
+	if currentAssistant != nil && (!shouldSummarize || len(currentAssistant.ToolCalls()) == 0) {
+		a.sendChannelReply(ctx, call, currentAssistant.Content().String(), completedToolCalls)
 	}
 
 	// Release active request before publishing the notification.
@@ -1337,30 +1408,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	return a.Run(ctx, firstQueuedMessage)
 }
 
-func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt string, modelType config.SelectedModelType, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
+func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, opts fantasy.ProviderOptions, onAuthRefresh func(context.Context, *fantasy.ProviderError) error) error {
 	if a.IsSessionBusy(sessionID) {
 		return ErrSessionBusy
 	}
 
-	// Select the model based on modelType.
-	var model Model
-	switch modelType {
-	case config.SelectedModelTypeSmall:
-		model = a.smallModel.Get()
-	default:
-		model = a.largeModel.Get()
-	}
-
-	genCtx, cancel := context.WithCancel(ctx)
-	ac := &activeCancel{cancel: cancel}
-	a.activeRequests.Set(sessionID, ac)
-	defer a.activeRequests.CompareAndDelete(sessionID, ac)
-	defer cancel()
-	defer func() {
-		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
-			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
-		}
-	}()
+	// Copy mutable fields under lock to avoid races with SetModels.
+	largeModel := a.largeModel.Get()
+	systemPromptPrefix := a.systemPromptPrefix.Get()
 
 	currentSession, err := a.sessions.Get(ctx, sessionID)
 	if err != nil {
@@ -1375,45 +1430,44 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt s
 		return nil
 	}
 
-	systemPromptPrefix := a.systemPromptPrefix.Get()
+	aiMsgs, _ := a.preparePrompt(msgs, largeModel.CatwalkCfg.SupportsImages)
 
-	// Check if chunking is needed when using a small model.
-	cw := model.CatwalkCfg.ContextWindow
-	tokens := currentSession.CompletionTokens + currentSession.PromptTokens
-	needsChunking := modelType == config.SelectedModelTypeSmall && cw > 0 && tokens > int64(float64(cw)*0.9)
+	genCtx, cancel := context.WithCancel(ctx)
+	ac := &activeCancel{cancel: cancel}
+	a.activeRequests.Set(sessionID, ac)
+	defer a.activeRequests.CompareAndDelete(sessionID, ac)
+	defer cancel()
+	defer func() {
+		if flushErr := a.messages.FlushAll(ctx); flushErr != nil {
+			slog.Error("Failed to flush pending message updates after summarize", "error", flushErr)
+		}
+	}()
 
-	if needsChunking {
-		return a.summarizeInChunks(genCtx, sessionID, prompt, model, msgs, currentSession, systemPromptPrefix, opts, onAuthRefresh)
-	}
-
-	// Single-pass summarization (existing behavior).
-	aiMsgs, _ := a.preparePrompt(msgs, model.CatwalkCfg.SupportsImages)
-
-	fAgent := fantasy.NewAgent(
-		model.Model,
+	agent := fantasy.NewAgent(
+		largeModel.Model,
 		fantasy.WithSystemPrompt(string(summaryPrompt)),
 		fantasy.WithUserAgent(userAgent),
 	)
 	summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
 		Role:             message.Assistant,
-		Model:            model.ModelCfg.Model,
-		Provider:         model.ModelCfg.Provider,
+		Model:            largeModel.ModelCfg.Model,
+		Provider:         largeModel.ModelCfg.Provider,
 		IsSummaryMessage: true,
 	})
 	if err != nil {
 		return err
 	}
 
-	summaryPromptText := buildSummaryPrompt(currentSession.Todos, prompt)
+	summaryPromptText := buildSummaryPrompt(currentSession.Todos)
 
-	resp, err := fAgent.Stream(genCtx, fantasy.AgentStreamCall{
+	resp, err := agent.Stream(genCtx, fantasy.AgentStreamCall{
 		Prompt:          summaryPromptText,
 		Messages:        aiMsgs,
 		Headers:         sessionHeaders(sessionID),
 		ProviderOptions: opts,
 		OnAuthRefresh:   onAuthRefresh,
 		ModelProvider: func() fantasy.LanguageModel {
-			return model.Model
+			return a.largeModel.Get().Model
 		},
 		PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
 			prepared.Messages = options.Messages
@@ -1427,6 +1481,7 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt s
 			return a.messages.Update(genCtx, summaryMessage)
 		},
 		OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
+			// Handle anthropic signature.
 			if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
 				if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
 					summaryMessage.AppendReasoningSignature(signature.Signature)
@@ -1443,9 +1498,12 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt s
 	if err != nil {
 		isCancelErr := errors.Is(err, context.Canceled)
 		if isCancelErr {
+			// User cancelled summarize we need to remove the summary message.
 			deleteErr := a.messages.Delete(ctx, summaryMessage.ID)
 			return deleteErr
 		}
+		// Mark the summary message as finished with an error so the UI
+		// stops spinning.
 		summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
 		if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
 			return updateErr
@@ -1454,22 +1512,38 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt s
 	}
 
 	summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-	if err := a.messages.Update(genCtx, summaryMessage); err != nil {
+	err = a.messages.Update(genCtx, summaryMessage)
+	if err != nil {
 		return err
 	}
 
-	a.updateSessionUsage(model, &currentSession, resp.TotalUsage, nil, false)
+	var openrouterCost *float64
+	for _, step := range resp.Steps {
+		stepCost := a.openrouterCost(step.ProviderMetadata)
+		if stepCost != nil {
+			newCost := *stepCost
+			if openrouterCost != nil {
+				newCost += *openrouterCost
+			}
+			openrouterCost = &newCost
+		}
+	}
 
+	a.updateSessionUsage(largeModel, &currentSession, resp.TotalUsage, openrouterCost, false)
+
+	// Just in case, get just the last usage info.
 	usage := resp.Response.Usage
 	currentSession.SummaryMessageID = summaryMessage.ID
 	currentSession.CompletionTokens = summaryCompletionTokens(usage, summaryMessage)
 	currentSession.PromptTokens = 0
 	currentSession.EstimatedUsage = usageIsZero(usage)
-	if _, err = a.sessions.Save(genCtx, currentSession); err != nil {
+	_, err = a.sessions.Save(genCtx, currentSession)
+	if err != nil {
 		return err
 	}
 
-	// Release the active request before processing queued messages.
+	// Release the active request before processing queued messages so that
+	// Run() does not see the session as busy.
 	a.activeRequests.Del(sessionID)
 	cancel()
 
@@ -1482,241 +1556,6 @@ func (a *sessionAgent) Summarize(ctx context.Context, sessionID string, prompt s
 	a.messageQueue.Set(sessionID, queuedMessages[1:])
 	_, qErr := a.Run(ctx, firstQueuedMessage)
 	return qErr
-}
-
-// summarizeInChunks splits the conversation into chunks that fit within the
-// model's context window, summarizes each chunk greedily oldest-to-newest,
-// and prepends the accumulated summary from prior chunks before each new chunk.
-func (a *sessionAgent) summarizeInChunks(
-	ctx context.Context,
-	sessionID, prompt string,
-	model Model,
-	msgs []message.Message,
-	currentSession session.Session,
-	systemPromptPrefix string,
-	opts fantasy.ProviderOptions,
-	onAuthRefresh func(context.Context, *fantasy.ProviderError) error,
-) error {
-	cw := model.CatwalkCfg.ContextWindow
-	maxChunkTokens := int64(float64(cw) * 0.9)
-	chunkThreshold := int64(float64(cw) * 0.15)
-	usableTokens := maxChunkTokens - chunkThreshold
-
-	// Tokenize messages using a rough estimate.
-	type msgTokens struct {
-		content string
-		tokens  int64
-	}
-	var tokenized []msgTokens
-	for _, m := range msgs {
-		text := m.Content().Text
-		tok := int64(len(text)/4) + 10 // Rough estimate plus overhead.
-		if tok < 1 {
-			tok = 1
-		}
-		tokenized = append(tokenized, msgTokens{content: text, tokens: tok})
-	}
-
-	if len(tokenized) == 0 {
-		return nil
-	}
-
-	// Build chunks oldest-to-newest.
-	var chunks [][]msgTokens
-	var currentChunk []msgTokens
-	var currentTokens int64
-
-	for _, mt := range tokenized {
-		if currentTokens+mt.tokens > usableTokens && len(currentChunk) > 0 {
-			chunks = append(chunks, currentChunk)
-			currentChunk = nil
-			currentTokens = 0
-		}
-		currentChunk = append(currentChunk, mt)
-		currentTokens += mt.tokens
-	}
-	if len(currentChunk) > 0 {
-		chunks = append(chunks, currentChunk)
-	}
-
-	if len(chunks) <= 1 {
-		// Actually fits in one pass; let Summarize handle it.
-		return nil
-	}
-
-	accumulatedSummary := ""
-
-	for i, chunk := range chunks {
-		// Build fantasy messages for this chunk.
-		var chunkMsgs []fantasy.Message
-		for _, mt := range chunk {
-			chunkMsgs = append(chunkMsgs, fantasy.NewUserMessage(mt.content))
-		}
-
-		if accumulatedSummary != "" {
-			chunkMsgs = append([]fantasy.Message{
-				fantasy.NewUserMessage("Accumulated summary so far:\n\n" + accumulatedSummary),
-			}, chunkMsgs...)
-		}
-
-		chunkPrompt := ""
-		if i < len(chunks)-1 {
-			chunkPrompt = "Provide a concise summary of the following conversation segment. " +
-				"Focus on key decisions, code changes, and important context. " +
-				"Omit greetings and minor details."
-			if prompt != "" {
-				chunkPrompt += "\n\nThe user is about to ask: " + prompt
-			}
-		} else {
-			chunkPrompt = buildSummaryPrompt(currentSession.Todos, prompt)
-		}
-
-		fAgent := fantasy.NewAgent(
-			model.Model,
-			fantasy.WithSystemPrompt(string(summaryPrompt)),
-			fantasy.WithUserAgent(userAgent),
-		)
-
-		chunkResult, err := fAgent.Stream(ctx, fantasy.AgentStreamCall{
-			Prompt:          chunkPrompt,
-			Messages:        chunkMsgs,
-			Headers:         sessionHeaders(sessionID),
-			ProviderOptions: opts,
-			OnAuthRefresh:   onAuthRefresh,
-			ModelProvider: func() fantasy.LanguageModel {
-				return model.Model
-			},
-			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-				prepared.Messages = options.Messages
-				if systemPromptPrefix != "" {
-					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
-				}
-				return callContext, prepared, nil
-			},
-		})
-		if err != nil {
-			slog.Error("Chunk summarization failed, falling back to large model", "chunk", i, "error", err)
-			return a.summarizeRemaining(ctx, sessionID, prompt, msgs, currentSession, opts, onAuthRefresh)
-		}
-
-		var chunkText string
-		for _, step := range chunkResult.Steps {
-			for _, content := range step.Content {
-				if text, ok := content.(fantasy.TextContent); ok {
-					chunkText += text.Text
-				}
-			}
-		}
-
-		if chunkText != "" {
-			if accumulatedSummary != "" {
-				accumulatedSummary = accumulatedSummary + "\n\n" + chunkText
-			} else {
-				accumulatedSummary = chunkText
-			}
-		}
-	}
-
-	// Final consolidation pass.
-	if accumulatedSummary != "" {
-		finalMsgs := []fantasy.Message{
-			fantasy.NewUserMessage("Full conversation summary:\n\n" + accumulatedSummary),
-		}
-
-		finalPrompt := buildSummaryPrompt(currentSession.Todos, prompt)
-
-		summaryMessage, err := a.messages.Create(ctx, sessionID, message.CreateMessageParams{
-			Role:             message.Assistant,
-			Model:            model.ModelCfg.Model,
-			Provider:         model.ModelCfg.Provider,
-			IsSummaryMessage: true,
-		})
-		if err != nil {
-			return err
-		}
-
-		fAgent := fantasy.NewAgent(
-			model.Model,
-			fantasy.WithSystemPrompt(string(summaryPrompt)),
-			fantasy.WithUserAgent(userAgent),
-		)
-
-		resp, err := fAgent.Stream(ctx, fantasy.AgentStreamCall{
-			Prompt:          finalPrompt,
-			Messages:        finalMsgs,
-			Headers:         sessionHeaders(sessionID),
-			ProviderOptions: opts,
-			OnAuthRefresh:   onAuthRefresh,
-			ModelProvider: func() fantasy.LanguageModel {
-				return model.Model
-			},
-			PrepareStep: func(callContext context.Context, options fantasy.PrepareStepFunctionOptions) (_ context.Context, prepared fantasy.PrepareStepResult, err error) {
-				prepared.Messages = options.Messages
-				if systemPromptPrefix != "" {
-					prepared.Messages = append([]fantasy.Message{fantasy.NewSystemMessage(systemPromptPrefix)}, prepared.Messages...)
-				}
-				return callContext, prepared, nil
-			},
-			OnReasoningDelta: func(id string, text string) error {
-				summaryMessage.AppendReasoningContent(text)
-				return a.messages.Update(ctx, summaryMessage)
-			},
-			OnReasoningEnd: func(id string, reasoning fantasy.ReasoningContent) error {
-				if anthropicData, ok := reasoning.ProviderMetadata["anthropic"]; ok {
-					if signature, ok := anthropicData.(*anthropic.ReasoningOptionMetadata); ok && signature.Signature != "" {
-						summaryMessage.AppendReasoningSignature(signature.Signature)
-					}
-				}
-				summaryMessage.FinishThinking()
-				return a.messages.Update(ctx, summaryMessage)
-			},
-			OnTextDelta: func(id, text string) error {
-				summaryMessage.AppendContent(text)
-				return a.messages.Update(ctx, summaryMessage)
-			},
-		})
-		if err != nil {
-			isCancelErr := errors.Is(err, context.Canceled)
-			if isCancelErr {
-				return a.messages.Delete(ctx, summaryMessage.ID)
-			}
-			summaryMessage.AddFinish(message.FinishReasonError, "Summarization Error", err.Error())
-			if updateErr := a.messages.Update(ctx, summaryMessage); updateErr != nil {
-				return updateErr
-			}
-			return a.summarizeRemaining(ctx, sessionID, prompt, msgs, currentSession, opts, onAuthRefresh)
-		}
-
-		summaryMessage.AddFinish(message.FinishReasonEndTurn, "", "")
-		if err := a.messages.Update(ctx, summaryMessage); err != nil {
-			return err
-		}
-
-		a.updateSessionUsage(model, &currentSession, resp.TotalUsage, nil, false)
-
-		usage := resp.Response.Usage
-		currentSession.SummaryMessageID = summaryMessage.ID
-		currentSession.CompletionTokens = summaryCompletionTokens(usage, summaryMessage)
-		currentSession.PromptTokens = 0
-		currentSession.EstimatedUsage = usageIsZero(usage)
-		if _, err = a.sessions.Save(ctx, currentSession); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-// summarizeRemaining falls back to the large model for a single-pass summarization.
-func (a *sessionAgent) summarizeRemaining(
-	ctx context.Context,
-	sessionID, prompt string,
-	msgs []message.Message,
-	currentSession session.Session,
-	opts fantasy.ProviderOptions,
-	onAuthRefresh func(context.Context, *fantasy.ProviderError) error,
-) error {
-	return a.Summarize(ctx, sessionID, prompt, config.SelectedModelTypeLarge, opts, onAuthRefresh)
 }
 
 func (a *sessionAgent) getCacheControlOptions() fantasy.ProviderOptions {
@@ -1753,7 +1592,7 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 	parts := []message.ContentPart{message.TextContent{Text: call.Prompt, Hidden: call.HiddenUserMessage}}
 	var attachmentParts []message.ContentPart
 	for _, attachment := range call.Attachments {
-		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content, Skill: attachment.Skill})
+		attachmentParts = append(attachmentParts, message.BinaryContent{Path: attachment.FilePath, MIMEType: attachment.MimeType, Data: attachment.Content})
 	}
 	parts = append(parts, attachmentParts...)
 	msg, err := a.messages.Create(ctx, call.SessionID, message.CreateMessageParams{
@@ -1868,6 +1707,36 @@ If not, please feel free to ignore. Again do not mention this message to the use
 	}
 
 	return history, files
+}
+
+// filterDisabledMCPTools removes tools from MCP servers disabled via the
+// "Toggle MCPs" dialog. The override set is repository-scoped and shared
+// by every session in the repository, including sub-agent sessions.
+// Connections are process-global and left untouched; only the tool list
+// changes.
+func (a *sessionAgent) filterDisabledMCPTools(ctx context.Context, toolList []fantasy.AgentTool) []fantasy.AgentTool {
+	disabledServers, err := a.sessions.MCPDisabledServers(ctx)
+	if err != nil {
+		slog.Error("Failed to list disabled MCP servers", "error", err)
+		return toolList
+	}
+	if len(disabledServers) == 0 {
+		return toolList
+	}
+	disabled := make(map[string]struct{}, len(disabledServers))
+	for _, name := range disabledServers {
+		disabled[name] = struct{}{}
+	}
+	filtered := make([]fantasy.AgentTool, 0, len(toolList))
+	for _, t := range toolList {
+		if mcpTool, ok := t.(*tools.Tool); ok {
+			if _, off := disabled[mcpTool.MCP()]; off {
+				continue
+			}
+		}
+		filtered = append(filtered, t)
+	}
+	return filtered
 }
 
 // filterFileParts removes fantasy.FilePart entries from a slice of message
@@ -2075,7 +1944,6 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 			}
 			openrouterCost = &newCost
 		}
-		extractHyperCredits(step.ProviderMetadata)
 	}
 
 	modelConfig := model.CatwalkCfg
@@ -2094,7 +1962,7 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		cost = 0
 	}
 
-	promptTokens := resp.TotalUsage.InputTokens + resp.TotalUsage.CacheCreationTokens
+	promptTokens := contextTokens(resp.TotalUsage)
 	completionTokens := resp.TotalUsage.OutputTokens
 
 	// Atomically update only title and usage fields to avoid overriding other
@@ -2118,25 +1986,6 @@ func (a *sessionAgent) openrouterCost(metadata fantasy.ProviderMetadata) *float6
 		return nil
 	}
 	return &opts.Usage.Cost
-}
-
-// extractHyperCredits reads usage.remaining.hypercredits from OpenAI
-// provider metadata and stores it for the next FetchCredits call.
-func extractHyperCredits(metadata fantasy.ProviderMetadata) {
-	openaiMeta, ok := metadata[openai.Name]
-	if !ok {
-		return
-	}
-	pm, ok := openaiMeta.(*openai.ProviderMetadata)
-	if !ok {
-		return
-	}
-	var remaining struct {
-		Hypercredits float64 `json:"hypercredits"`
-	}
-	if pm.ExtraField("remaining", &remaining) && remaining.Hypercredits > 0 {
-		hyper.SetBalance(int(math.Round(remaining.Hypercredits)))
-	}
 }
 
 // extractPrismModel returns the ID and name of the model that actually
@@ -2217,11 +2066,22 @@ func (a *sessionAgent) updateSessionUsage(model Model, session *session.Session,
 	updateSessionTokenCounters(session, usage)
 }
 
+// contextTokens returns the size of the prompt the provider processed for
+// a step. Providers with prompt caching (Anthropic, Bedrock, Vercel) report
+// the prompt as three disjoint buckets: tokens served from cache, tokens
+// newly written to the cache, and the uncached remainder. All three occupy
+// the context window, so all three count. Providers without cache writes
+// leave CacheCreationTokens at zero, and the OpenAI-style providers already
+// subtract cached tokens from InputTokens, so nothing is counted twice.
+func contextTokens(usage fantasy.Usage) int64 {
+	return usage.InputTokens + usage.CacheReadTokens + usage.CacheCreationTokens
+}
+
 func updateSessionTokenCounters(session *session.Session, usage fantasy.Usage) {
 	if usage.OutputTokens != 0 {
 		session.CompletionTokens = usage.OutputTokens
 	}
-	if promptTokens := usage.InputTokens + usage.CacheReadTokens; promptTokens != 0 {
+	if promptTokens := contextTokens(usage); promptTokens != 0 {
 		session.PromptTokens = promptTokens
 	}
 }
@@ -2519,14 +2379,9 @@ func (a *sessionAgent) workaroundProviderMediaLimitations(messages []fantasy.Mes
 }
 
 // buildSummaryPrompt constructs the prompt text for session summarization.
-func buildSummaryPrompt(todos []session.Todo, prompt string) string {
+func buildSummaryPrompt(todos []session.Todo) string {
 	var sb strings.Builder
 	sb.WriteString("Provide a detailed summary of our conversation above.")
-	if prompt != "" {
-		sb.WriteString("\n\nThe user is about to ask: ")
-		sb.WriteString(prompt)
-		sb.WriteString("\n\nKeep this in mind when summarizing \u2014 preserve context relevant to the upcoming request.")
-	}
 	if len(todos) > 0 {
 		sb.WriteString("\n\n## Current Todo List\n\n")
 		for _, t := range todos {
