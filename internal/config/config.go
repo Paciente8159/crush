@@ -458,6 +458,10 @@ type Options struct {
 	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
 	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
 	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	// DisableSystemPromptFiles turns off loading SYSTEM.md and
+	// SYSTEM_APPEND.md, which override or append to the built-in system
+	// prompt. See applySystemPromptFiles.
+	DisableSystemPromptFiles bool `json:"disable_system_prompt_files,omitempty" jsonschema:"description=Disable loading SYSTEM.md and SYSTEM_APPEND.md system prompt override files,default=false"`
 	// DataDirectory is where Crush keeps per-project state such as
 	// the SQLite database and workspace overrides. Relative paths are
 	// resolved against the working directory; absolute paths are used

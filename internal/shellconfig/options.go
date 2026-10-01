@@ -235,6 +235,7 @@ var optionSpecs = map[string]optionSpec{
 	"auto-resume":          {jsonKey: "disable_auto_resume", kind: optBool, inverted: true},
 	"provider-auto-update": {jsonKey: "disable_provider_auto_update", kind: optBool, inverted: true},
 	"default-providers":    {jsonKey: "disable_default_providers", kind: optBool, inverted: true},
+	"system-prompt-files":  {jsonKey: "disable_system_prompt_files", kind: optBool, inverted: true},
 
 	// String fields.
 	"notifications":           {jsonKey: "notifications", kind: optString},

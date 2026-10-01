@@ -21,7 +21,7 @@ var planPromptTmpl []byte
 var initializePromptTmpl []byte
 
 func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("coder", string(coderPromptTmpl), opts...)
+	systemPrompt, err := prompt.NewPrompt("coder", string(coderPromptTmpl), append(opts, prompt.WithSystemPromptPatches())...)
 	if err != nil {
 		return nil, err
 	}
@@ -29,7 +29,7 @@ func coderPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 }
 
 func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("task", string(taskPromptTmpl), opts...)
+	systemPrompt, err := prompt.NewPrompt("task", string(taskPromptTmpl), append(opts, prompt.WithSystemPromptPatches())...)
 	if err != nil {
 		return nil, err
 	}
@@ -37,7 +37,7 @@ func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 }
 
 func planPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
-	systemPrompt, err := prompt.NewPrompt("plan", string(planPromptTmpl), opts...)
+	systemPrompt, err := prompt.NewPrompt("plan", string(planPromptTmpl), append(opts, prompt.WithSystemPromptPatches())...)
 	if err != nil {
 		return nil, err
 	}

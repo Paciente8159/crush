@@ -368,7 +368,7 @@ Adapt verbosity to match the work completed:
 - Keep tone direct and factual, like handing off work to a teammate
 </final_answers>
 
-<env>
+{{/* dynamic-tail */}}<env>
 Working directory: {{.WorkingDir}}
 Is directory a git repo: {{if .IsGitRepo}}yes{{else}}no{{end}}
 Platform: {{.Platform}}
