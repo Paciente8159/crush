@@ -554,6 +554,37 @@ option global-context-path "~/path/to/custom/context/file.md"
 option global-context-path "/full/path/to/folder/of/files/"
 ```
 
+### Overriding the system prompt
+
+Crush builds its system prompt from a built-in template. You can override or
+append to it with `SYSTEM.md` (replace) and `SYSTEM_APPEND.md` (append) files.
+Crush applies them from the lowest priority to the highest, so files closer to
+your project win:
+
+| Priority | Location      | Unix-like                               | Windows                                           |
+| -------- | ------------- | --------------------------------------- | ------------------------------------------------- |
+| 1        | Project       | `./.crush/SYSTEM.md`                    | `.\.crush\SYSTEM.md`                              |
+| 2        | Project       | `./.crush/SYSTEM_APPEND.md`             | `.\.crush\SYSTEM_APPEND.md`                       |
+| 3        | Global config | `~/.config/crush/SYSTEM.md`             | `%USERPROFILE%\.config\crush\SYSTEM.md`           |
+| 4        | Global config | `~/.config/crush/SYSTEM_APPEND.md`      | `%USERPROFILE%\.config\crush\SYSTEM_APPEND.md`    |
+| 5        | Global data   | `~/.local/share/crush/SYSTEM.md`        | `%LOCALAPPDATA%\crush\SYSTEM.md`                  |
+| 6        | Global data   | `~/.local/share/crush/SYSTEM_APPEND.md` | `%LOCALAPPDATA%\crush\SYSTEM_APPEND.md`           |
+
+Crush applies the files in order from priority 6 down to priority 1.
+`SYSTEM_APPEND.md` files add their contents to the prompt, while `SYSTEM.md`
+files replace everything accumulated so far. A `SYSTEM.md` at priority 1
+therefore wins outright. Empty files are ignored.
+
+The dynamic sections Crush adds at runtime (working directory, platform,
+skills, project context, and MCP instructions) are always appended afterwards,
+so overriding the prompt never removes them.
+
+Disable the feature entirely with:
+
+```bash
+option system-prompt-files false
+```
+
 ### Ignoring Files
 
 Crush respects `.gitignore` files by default, but you can also create a

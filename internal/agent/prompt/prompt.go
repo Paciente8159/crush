@@ -20,6 +20,19 @@ import (
 	"github.com/charmbracelet/crush/internal/skills"
 )
 
+// dynamicTailMarker separates a prompt template's static body from its
+// session-specific tail (environment, LSP, skills, context files). It is a
+// template comment so it renders to nothing. SYSTEM.md and SYSTEM_APPEND.md
+// patch the body only; the tail is always appended afterwards.
+const dynamicTailMarker = "{{/* dynamic-tail */}}"
+
+// System prompt override files, looked up in each of the project, global
+// config, and global data directories.
+const (
+	systemPromptFile       = "SYSTEM.md"
+	systemPromptAppendFile = "SYSTEM_APPEND.md"
+)
+
 // Prompt represents a template-based prompt generator.
 type Prompt struct {
 	name       string
@@ -27,6 +40,7 @@ type Prompt struct {
 	now        func() time.Time
 	platform   string
 	workingDir string
+	patches    bool
 }
 
 type PromptDat struct {
@@ -68,6 +82,14 @@ func WithWorkingDir(workingDir string) Option {
 	}
 }
 
+// WithSystemPromptPatches enables SYSTEM.md and SYSTEM_APPEND.md patching of
+// this prompt's static body.
+func WithSystemPromptPatches() Option {
+	return func(p *Prompt) {
+		p.patches = true
+	}
+}
+
 func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
 	p := &Prompt{
 		name:     name,
@@ -81,20 +103,92 @@ func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
 }
 
 func (p *Prompt) Build(ctx context.Context, provider, model string, store *config.ConfigStore) (string, error) {
-	t, err := template.New(p.name).Parse(p.template)
-	if err != nil {
-		return "", fmt.Errorf("parsing template: %w", err)
-	}
-	var sb strings.Builder
 	d, err := p.promptData(ctx, provider, model, store)
 	if err != nil {
 		return "", err
 	}
+
+	bodySrc, tailSrc, _ := strings.Cut(p.template, dynamicTailMarker)
+
+	body, err := renderPrompt(p.name, bodySrc, d)
+	if err != nil {
+		return "", err
+	}
+
+	if p.patches && !store.Config().Options.DisableSystemPromptFiles {
+		body = applySystemPromptFiles(body, cmp.Or(p.workingDir, store.WorkingDir()))
+	}
+
+	tail, err := renderPrompt(p.name+"_tail", tailSrc, d)
+	if err != nil {
+		return "", err
+	}
+
+	return body + tail, nil
+}
+
+func renderPrompt(name, src string, d PromptDat) (string, error) {
+	if src == "" {
+		return "", nil
+	}
+	t, err := template.New(name).Parse(src)
+	if err != nil {
+		return "", fmt.Errorf("parsing template: %w", err)
+	}
+	var sb strings.Builder
 	if err := t.Execute(&sb, d); err != nil {
 		return "", fmt.Errorf("executing template: %w", err)
 	}
-
 	return sb.String(), nil
+}
+
+// systemPromptPatch is one override or append file in the patch order.
+type systemPromptPatch struct {
+	path   string
+	append bool
+}
+
+// systemPromptFiles returns the SYSTEM.md and SYSTEM_APPEND.md files to
+// apply, lowest priority first so later entries win. Priority 1 is the
+// project's .crush directory, then the global config directory, then the
+// global data directory; SYSTEM_APPEND.md files append while SYSTEM.md files
+// replace.
+func systemPromptFiles(workingDir string) []systemPromptPatch {
+	configDir := filepath.Dir(config.GlobalConfig())
+	dataDir := filepath.Dir(config.GlobalConfigData())
+	projectDir := filepath.Join(workingDir, ".crush")
+
+	return []systemPromptPatch{
+		{filepath.Join(dataDir, systemPromptAppendFile), true},
+		{filepath.Join(dataDir, systemPromptFile), false},
+		{filepath.Join(configDir, systemPromptAppendFile), true},
+		{filepath.Join(configDir, systemPromptFile), false},
+		{filepath.Join(projectDir, systemPromptAppendFile), true},
+		{filepath.Join(projectDir, systemPromptFile), false},
+	}
+}
+
+// applySystemPromptFiles patches body with the SYSTEM.md and
+// SYSTEM_APPEND.md files found on disk. SYSTEM_APPEND.md files append,
+// SYSTEM.md files replace the accumulated text, and the project directory
+// wins over the global ones. Missing or empty files are skipped.
+func applySystemPromptFiles(body, workingDir string) string {
+	for _, f := range systemPromptFiles(workingDir) {
+		content, err := os.ReadFile(f.path)
+		if err != nil {
+			continue
+		}
+		text := strings.TrimSpace(string(content))
+		if text == "" {
+			continue
+		}
+		if f.append {
+			body = strings.TrimRight(body, "\n") + "\n\n" + text + "\n\n"
+		} else {
+			body = text + "\n\n"
+		}
+	}
+	return body
 }
 
 func processFile(filePath string) *ContextFile {

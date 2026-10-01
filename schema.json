@@ -562,6 +562,11 @@
           "description": "Disable automatic conversation summarization",
           "default": false
         },
+        "disable_system_prompt_files": {
+          "type": "boolean",
+          "description": "Disable loading SYSTEM.md and SYSTEM_APPEND.md system prompt override files",
+          "default": false
+        },
         "data_directory": {
           "type": "string",
           "description": "Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.",
